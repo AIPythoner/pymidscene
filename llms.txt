@@ -1,0 +1,66 @@
+# PyMidscene
+
+> Python SDK for Midscene.js - AI-powered UI automation using natural language
+
+PyMidscene is a Python port of [Midscene.js](https://midscenejs.com), enabling AI-driven browser automation without CSS selectors or XPath. Just describe elements in natural language.
+
+## Quick Start
+
+```bash
+pip install pymidscene
+```
+
+```python
+from pymidscene import PlaywrightAgent
+from playwright.async_api import async_playwright
+
+async with async_playwright() as p:
+    browser = await p.chromium.launch()
+    page = await browser.new_page()
+    agent = PlaywrightAgent(page)
+    
+    await page.goto("https://example.com")
+    await agent.ai_click("the login button")
+    await agent.ai_input("email field", "test@example.com")
+```
+
+## Core API
+
+- `ai_click(description)` - Click element by natural language description
+- `ai_input(description, text)` - Type text into an input field
+- `ai_locate(description)` - Locate element and return coordinates
+- `ai_query(schema)` - Extract structured data from page
+- `ai_assert(assertion)` - Assert page state
+
+## Supported Models
+
+- Doubao Vision (ByteDance)
+- Qwen VL (Alibaba)
+- GPT-4V (OpenAI)
+- Claude (Anthropic)
+
+## Links
+
+- GitHub: https://github.com/AIPythoner/pymidscene
+- PyPI: https://pypi.org/project/pymidscene/
+- Original JS Version: https://github.com/web-infra-dev/midscene
+- Documentation: https://midscenejs.com
+
+## Configuration
+
+Set environment variables:
+
+```bash
+MIDSCENE_MODEL_NAME=your-model-name
+MIDSCENE_MODEL_API_KEY=your-api-key
+MIDSCENE_MODEL_BASE_URL=https://api-endpoint
+MIDSCENE_MODEL_FAMILY=doubao-vision  # or qwen2.5-vl, openai, claude
+```
+
+## Features
+
+- Natural language UI automation
+- Multi-model support (Doubao, Qwen, GPT-4V, Claude)
+- XPath-based caching (compatible with Midscene.js)
+- Visual HTML reports
+- Playwright integration
