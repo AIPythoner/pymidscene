@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pymidscene"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python SDK for Midscene.js - AI-powered UI automation using natural language"
 authors = ["AIPythoner"]
 readme = "README.md"
