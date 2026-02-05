@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1280, height=800">
+    <title>PyMidscene 自动化测试页面</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, "Microsoft YaHei", sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #333;
+        }
+        
+        .test-section {
+            background: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .test-section h2 {
+            margin-bottom: 15px;
+            color: #4e6ef2;
+            font-size: 18px;
+        }
+        
+        .test-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+            gap: 15px;
+        }
+        
+        label {
+            width: 120px;
+            font-weight: bold;
+        }
+        
+        input[type="text"], input[type="password"], textarea {
+            flex: 1;
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            max-width: 400px;
+        }
+        
+        input:focus, textarea:focus {
+            border-color: #4e6ef2;
+            outline: none;
+        }
+        
+        button {
+            padding: 10px 20px;
+            background: #4e6ef2;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background: #3d5bd9;
+        }
+        
+        button.secondary {
+            background: #6c757d;
+        }
+        
+        button.danger {
+            background: #dc3545;
+        }
+        
+        button.success {
+            background: #28a745;
+        }
+        
+        .hover-area {
+            padding: 20px;
+            background: #e9ecef;
+            border-radius: 5px;
+            text-align: center;
+            transition: all 0.3s;
+        }
+        
+        .hover-area:hover {
+            background: #4e6ef2;
+            color: #fff;
+        }
+        
+        .hover-area.hovered {
+            background: #28a745;
+            color: #fff;
+        }
+        
+        /* 事件日志区域 */
+        #event-log {
+            background: #1e1e1e;
+            color: #0f0;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 12px;
+            height: 200px;
+            overflow-y: auto;
+        }
+        
+        #event-log .log-item {
+            margin-bottom: 5px;
+        }
+        
+        #event-log .log-item.success {
+            color: #0f0;
+        }
+        
+        #event-log .log-item.error {
+            color: #f00;
+        }
+        
+        #event-log .log-item.info {
+            color: #0ff;
+        }
+        
+        /* 测试结果汇总 */
+        #test-results {
+            background: #fff;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        
+        .result-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .result-item:last-child {
+            border-bottom: none;
+        }
+        
+        .result-item .status {
+            font-weight: bold;
+        }
+        
+        .result-item .status.pass {
+            color: #28a745;
+        }
+        
+        .result-item .status.fail {
+            color: #dc3545;
+        }
+        
+        .result-item .status.pending {
+            color: #ffc107;
+        }
+        
+        /* 链接区域 */
+        .link-area a {
+            display: inline-block;
+            margin-right: 20px;
+            color: #4e6ef2;
+            text-decoration: none;
+        }
+        
+        .link-area a:hover {
+            text-decoration: underline;
+        }
+        
+        /* 复选框和单选框 */
+        .checkbox-group, .radio-group {
+            display: flex;
+            gap: 20px;
+        }
+        
+        .checkbox-group label, .radio-group label {
+            width: auto;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-weight: normal;
+            cursor: pointer;
+        }
+        
+        /* 下拉菜单 */
+        select {
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            min-width: 200px;
+        }
+    </style>
+</head>
+<body>
+    <h1>PyMidscene 自动化测试页面</h1>
+    
+    <!-- 输入测试区域 -->
+    <div class="test-section">
+        <h2>1. 输入测试</h2>
+        
+        <div class="test-row">
+            <label>用户名:</label>
+            <input type="text" id="username" placeholder="请输入用户名">
+        </div>
+        
+        <div class="test-row">
+            <label>密码:</label>
+            <input type="password" id="password" placeholder="请输入密码">
+        </div>
+        
+        <div class="test-row">
+            <label>搜索框:</label>
+            <input type="text" id="search-input" placeholder="请输入搜索内容">
+            <button id="search-btn">搜索</button>
+        </div>
+        
+        <div class="test-row">
+            <label>多行文本:</label>
+            <textarea id="textarea" rows="3" placeholder="请输入多行文本"></textarea>
+        </div>
+    </div>
+    
+    <!-- 点击测试区域 -->
+    <div class="test-section">
+        <h2>2. 点击测试</h2>
+        
+        <div class="test-row">
+            <button id="btn-primary">主要按钮</button>
+            <button id="btn-secondary" class="secondary">次要按钮</button>
+            <button id="btn-danger" class="danger">危险按钮</button>
+            <button id="btn-success" class="success">成功按钮</button>
+        </div>
+        
+        <div class="test-row">
+            <label>点击计数:</label>
+            <span id="click-count">0</span>
+            <button id="btn-counter">点击+1</button>
+            <button id="btn-reset" class="secondary">重置</button>
+        </div>
+    </div>
+    
+    <!-- Hover 测试区域 -->
+    <div class="test-section">
+        <h2>3. Hover 测试</h2>
+        
+        <div class="test-row">
+            <div class="hover-area" id="hover-area-1">
+                鼠标悬停区域1 - 悬停后变色
+            </div>
+        </div>
+        
+        <div class="test-row">
+            <div class="hover-area" id="hover-area-2">
+                鼠标悬停区域2 - 悬停后变色
+            </div>
+        </div>
+    </div>
+    
+    <!-- 表单控件测试 -->
+    <div class="test-section">
+        <h2>4. 表单控件测试</h2>
+        
+        <div class="test-row">
+            <label>复选框:</label>
+            <div class="checkbox-group">
+                <label><input type="checkbox" id="checkbox-1" value="option1"> 选项1</label>
+                <label><input type="checkbox" id="checkbox-2" value="option2"> 选项2</label>
+                <label><input type="checkbox" id="checkbox-3" value="option3"> 选项3</label>
+            </div>
+        </div>
+        
+        <div class="test-row">
+            <label>单选框:</label>
+            <div class="radio-group">
+                <label><input type="radio" name="radio-group" id="radio-1" value="A"> 选项A</label>
+                <label><input type="radio" name="radio-group" id="radio-2" value="B"> 选项B</label>
+                <label><input type="radio" name="radio-group" id="radio-3" value="C"> 选项C</label>
+            </div>
+        </div>
+        
+        <div class="test-row">
+            <label>下拉菜单:</label>
+            <select id="select-menu">
+                <option value="">请选择</option>
+                <option value="apple">苹果</option>
+                <option value="banana">香蕉</option>
+                <option value="orange">橙子</option>
+            </select>
+        </div>
+    </div>
+    
+    <!-- 链接测试 -->
+    <div class="test-section">
+        <h2>5. 链接测试</h2>
+        
+        <div class="link-area">
+            <a href="#" id="link-1">链接1</a>
+            <a href="#" id="link-2">链接2</a>
+            <a href="#" id="link-3">链接3</a>
+        </div>
+    </div>
+    
+    <!-- 事件日志 -->
+    <div class="test-section">
+        <h2>事件日志</h2>
+        <div id="event-log"></div>
+        <button id="clear-log" class="secondary" style="margin-top: 10px;">清空日志</button>
+    </div>
+    
+    <!-- 测试结果汇总 -->
+    <div class="test-section">
+        <h2>测试结果</h2>
+        <div id="test-results"></div>
+    </div>
+    
+    <script>
+        // ==================== 事件记录系统 ====================
+        const eventLog = document.getElementById('event-log');
+        const testResults = {};
+        
+        function log(message, type = 'info') {
+            const item = document.createElement('div');
+            item.className = `log-item ${type}`;
+            const time = new Date().toLocaleTimeString();
+            item.textContent = `[${time}] ${message}`;
+            eventLog.appendChild(item);
+            eventLog.scrollTop = eventLog.scrollHeight;
+        }
+        
+        function recordTest(testName, passed, details = '') {
+            testResults[testName] = { passed, details, timestamp: Date.now() };
+            updateTestResultsUI();
+        }
+        
+        function updateTestResultsUI() {
+            const container = document.getElementById('test-results');
+            container.innerHTML = '';
+            
+            for (const [name, result] of Object.entries(testResults)) {
+                const item = document.createElement('div');
+                item.className = 'result-item';
+                item.innerHTML = `
+                    <span>${name}</span>
+                    <span class="status ${result.passed ? 'pass' : 'fail'}">
+                        ${result.passed ? 'PASS' : 'FAIL'} ${result.details ? '- ' + result.details : ''}
+                    </span>
+                `;
+                container.appendChild(item);
+            }
+        }
+        
+        // ==================== 输入事件监听 ====================
+        const inputElements = ['username', 'password', 'search-input', 'textarea'];
+        
+        inputElements.forEach(id => {
+            const el = document.getElementById(id);
+            
+            el.addEventListener('focus', () => {
+                log(`[FOCUS] ${id} 获得焦点`, 'info');
+            });
+            
+            el.addEventListener('blur', () => {
+                log(`[BLUR] ${id} 失去焦点`, 'info');
+            });
+            
+            el.addEventListener('input', (e) => {
+                log(`[INPUT] ${id} 输入内容: "${e.target.value}"`, 'success');
+                recordTest(`输入-${id}`, e.target.value.length > 0, `值: "${e.target.value}"`);
+            });
+            
+            el.addEventListener('change', (e) => {
+                log(`[CHANGE] ${id} 内容变更: "${e.target.value}"`, 'success');
+            });
+        });
+        
+        // ==================== 点击事件监听 ====================
+        const buttons = ['btn-primary', 'btn-secondary', 'btn-danger', 'btn-success', 'search-btn'];
+        
+        buttons.forEach(id => {
+            const btn = document.getElementById(id);
+            btn.addEventListener('click', (e) => {
+                log(`[CLICK] 点击按钮: ${id} (${btn.textContent})`, 'success');
+                recordTest(`点击-${id}`, true);
+            });
+        });
+        
+        // 点击计数器
+        let clickCount = 0;
+        const countDisplay = document.getElementById('click-count');
+        
+        document.getElementById('btn-counter').addEventListener('click', () => {
+            clickCount++;
+            countDisplay.textContent = clickCount;
+            log(`[CLICK] 计数器+1, 当前值: ${clickCount}`, 'success');
+            recordTest('点击-计数器', true, `计数: ${clickCount}`);
+        });
+        
+        document.getElementById('btn-reset').addEventListener('click', () => {
+            clickCount = 0;
+            countDisplay.textContent = 0;
+            log(`[CLICK] 计数器重置`, 'info');
+        });
+        
+        // ==================== Hover 事件监听 ====================
+        const hoverAreas = ['hover-area-1', 'hover-area-2'];
+        
+        hoverAreas.forEach(id => {
+            const area = document.getElementById(id);
+            
+            area.addEventListener('mouseenter', () => {
+                log(`[HOVER] 鼠标进入: ${id}`, 'success');
+                area.classList.add('hovered');
+                recordTest(`Hover-${id}`, true);
+            });
+            
+            area.addEventListener('mouseleave', () => {
+                log(`[HOVER] 鼠标离开: ${id}`, 'info');
+                // 保持 hovered 状态作为验证
+            });
+        });
+        
+        // ==================== 复选框/单选框监听 ====================
+        const checkboxes = ['checkbox-1', 'checkbox-2', 'checkbox-3'];
+        
+        checkboxes.forEach(id => {
+            const cb = document.getElementById(id);
+            cb.addEventListener('change', (e) => {
+                log(`[CHECKBOX] ${id} ${e.target.checked ? '选中' : '取消'}: ${e.target.value}`, 'success');
+                recordTest(`复选框-${id}`, e.target.checked);
+            });
+        });
+        
+        const radios = ['radio-1', 'radio-2', 'radio-3'];
+        
+        radios.forEach(id => {
+            const radio = document.getElementById(id);
+            radio.addEventListener('change', (e) => {
+                log(`[RADIO] 选中: ${id} (${e.target.value})`, 'success');
+                recordTest(`单选框-${e.target.value}`, true);
+            });
+        });
+        
+        // ==================== 下拉菜单监听 ====================
+        document.getElementById('select-menu').addEventListener('change', (e) => {
+            log(`[SELECT] 选择: ${e.target.value}`, 'success');
+            recordTest('下拉菜单', e.target.value !== '', `选中: ${e.target.value}`);
+        });
+        
+        // ==================== 链接点击监听 ====================
+        const links = ['link-1', 'link-2', 'link-3'];
+        
+        links.forEach(id => {
+            const link = document.getElementById(id);
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                log(`[LINK] 点击链接: ${id} (${link.textContent})`, 'success');
+                recordTest(`链接-${id}`, true);
+            });
+        });
+        
+        // ==================== 清空日志 ====================
+        document.getElementById('clear-log').addEventListener('click', () => {
+            eventLog.innerHTML = '';
+            log('日志已清空', 'info');
+        });
+        
+        // ==================== 暴露给 Python 的验证接口 ====================
+        window.testAPI = {
+            // 获取所有测试结果
+            getTestResults: () => testResults,
+            
+            // 获取指定输入框的值
+            getInputValue: (id) => {
+                const el = document.getElementById(id);
+                return el ? el.value : null;
+            },
+            
+            // 检查元素是否被点击过
+            wasClicked: (testName) => {
+                return testResults[testName]?.passed || false;
+            },
+            
+            // 检查 hover 是否触发
+            wasHovered: (id) => {
+                const el = document.getElementById(id);
+                return el ? el.classList.contains('hovered') : false;
+            },
+            
+            // 获取复选框状态
+            isChecked: (id) => {
+                const el = document.getElementById(id);
+                return el ? el.checked : false;
+            },
+            
+            // 获取单选框选中值
+            getRadioValue: () => {
+                const checked = document.querySelector('input[name="radio-group"]:checked');
+                return checked ? checked.value : null;
+            },
+            
+            // 获取下拉菜单值
+            getSelectValue: () => {
+                return document.getElementById('select-menu').value;
+            },
+            
+            // 获取点击计数
+            getClickCount: () => clickCount,
+            
+            // 获取元素坐标
+            getElementRect: (id) => {
+                const el = document.getElementById(id);
+                if (!el) return null;
+                const rect = el.getBoundingClientRect();
+                return {
+                    id: id,
+                    left: Math.round(rect.left),
+                    top: Math.round(rect.top),
+                    right: Math.round(rect.right),
+                    bottom: Math.round(rect.bottom),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                    centerX: Math.round(rect.left + rect.width / 2),
+                    centerY: Math.round(rect.top + rect.height / 2)
+                };
+            },
+            
+            // 重置所有状态
+            reset: () => {
+                // 清空输入
+                inputElements.forEach(id => {
+                    document.getElementById(id).value = '';
+                });
+                // 重置复选框
+                checkboxes.forEach(id => {
+                    document.getElementById(id).checked = false;
+                });
+                // 重置单选框
+                radios.forEach(id => {
+                    document.getElementById(id).checked = false;
+                });
+                // 重置下拉菜单
+                document.getElementById('select-menu').value = '';
+                // 重置 hover 状态
+                hoverAreas.forEach(id => {
+                    document.getElementById(id).classList.remove('hovered');
+                });
+                // 重置计数器
+                clickCount = 0;
+                countDisplay.textContent = 0;
+                // 清空结果
+                Object.keys(testResults).forEach(k => delete testResults[k]);
+                updateTestResultsUI();
+                // 清空日志
+                eventLog.innerHTML = '';
+                log('测试状态已重置', 'info');
+            }
+        };
+        
+        // 初始化日志
+        log('测试页面已加载，等待自动化测试...', 'info');
+    </script>
+</body>
+</html>
