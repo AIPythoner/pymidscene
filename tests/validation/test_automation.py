@@ -218,7 +218,7 @@ async def run_automation_tests():
         print("\n1. 加载测试页面...")
         await page.goto(f"file://{test_page.absolute()}")
         await asyncio.sleep(1)
-        
+        await page.screenshot(path='1.png')
         # 创建 Agent
         agent = PlaywrightAgent(page, enable_recording=False)
         
@@ -268,7 +268,8 @@ async def run_automation_tests():
         print("\n" + "=" * 60)
         print("5. 复选框测试")
         print("=" * 60)
-        
+
+        await page.screenshot(path='2.png')
         await runner.test_checkbox("选项1复选框", "checkbox-1")
         await runner.test_checkbox("选项2复选框", "checkbox-2")
         

@@ -167,38 +167,99 @@ class Agent:
         messages: List[Dict[str, Any]],
         intent: str = INTENT_DEFAULT
     ) -> Dict[str, Any]:
-        """使用配置调用 AI"""
+        """
+        使用配置调用 AI
+        
+        支持两种调用方式：
+        1. httpx 直接请求（适用于反代、Gemini 等）- 更兼容
+        2. OpenAI SDK（适用于标准 OpenAI 兼容 API）- 备用
+        """
         config = self._get_model_config(intent)
 
-        # 构建调用参数
-        from openai import OpenAI
+        # 统一使用 httpx 直接请求，更兼容各种反代和 API 格式
+        return self._call_with_httpx(config, messages)
 
-        client = OpenAI(
-            api_key=config.openai_api_key,
-            base_url=config.openai_base_url,
-        )
+    def _call_with_httpx(
+        self,
+        config: ModelConfig,
+        messages: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        使用 httpx 直接请求（参考 GeminiHttpClient 实现）
+        
+        兼容：
+        - Gemini 反代（OpenAI 兼容格式）
+        - 豆包/千问等 OpenAI 兼容 API
+        - 任何 OpenAI 格式的反代服务
+        """
+        import httpx
 
-        response = client.chat.completions.create(
-            model=config.model_name,
-            messages=messages,
-            temperature=config.temperature,
-        )
+        # 构造请求 URL
+        base = (config.openai_base_url or "").rstrip("/")
+        if not base:
+            raise ValueError("MIDSCENE_MODEL_BASE_URL is required")
+        
+        # 智能拼接 URL：
+        # 1. 如果 base_url 已经包含版本路径（/v1, /v2, /v3 等），直接拼 /chat/completions
+        # 2. 否则自动加 /v1/chat/completions（适用于反代）
+        import re as _re
+        if _re.search(r'/v\d+$', base):
+            # 已经包含版本路径：/v1, /v3 等
+            url = f"{base}/chat/completions"
+        else:
+            # 没有版本路径，自动加 /v1（适用于反代）
+            url = f"{base}/v1/chat/completions"
+        
+        logger.debug(f"Request URL: {url}")
 
-        content = response.choices[0].message.content or ""
+        # 构造请求头
+        headers = {
+            "Authorization": f"Bearer {config.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # 构造请求体
+        data = {
+            "model": config.model_name,
+            "messages": messages,
+            "max_tokens": 4096,
+        }
+
+        # temperature 仅在非零时设置（有些 API 不支持）
+        if config.temperature is not None and config.temperature > 0:
+            data["temperature"] = config.temperature
+
+        # 发送请求（trust_env=False 禁用系统代理）
+        with httpx.Client(
+            trust_env=False,
+            timeout=config.timeout or 120
+        ) as client:
+            response = client.post(url, headers=headers, json=data)
+
+        if response.status_code != 200:
+            logger.error(f"API request failed: status={response.status_code}, body={response.text[:500]}")
+            raise RuntimeError(
+                f"API request failed (status {response.status_code}): {response.text[:200]}"
+            )
+
+        result = response.json()
+
+        # 提取响应内容（OpenAI 格式）
+        content = result["choices"][0]["message"]["content"]
 
         # 提取 usage 信息
         usage = None
-        if hasattr(response, 'usage') and response.usage:
+        if "usage" in result:
             usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens": result["usage"].get("prompt_tokens"),
+                "completion_tokens": result["usage"].get("completion_tokens"),
+                "total_tokens": result["usage"].get("total_tokens"),
             }
 
         return {
             "content": content,
             "usage": usage,
-            "raw_response": response
+            "raw_response": result
         }
 
     async def ai_locate(
@@ -342,7 +403,14 @@ class Agent:
         img_height = int(size.get('height', 800))
         
         try:
-            adapted_bbox = adapt_bbox(bbox, img_width, img_height, model_family)
+            adapted_bbox = adapt_bbox(
+                bbox=bbox,
+                width=img_width,
+                height=img_height,
+                right_limit=img_width,
+                bottom_limit=img_height,
+                model_family=model_family
+            )
             logger.debug(f"Adapted bbox: {bbox} -> {adapted_bbox} (model={model_family}, size={img_width}x{img_height})")
         except Exception as e:
             logger.warning(f"Failed to adapt bbox: {e}, using raw values")
@@ -400,12 +468,71 @@ class Agent:
 
         return element
 
-    async def ai_click(self, prompt: str) -> bool:
+    async def ai_locate_with_scroll_retry(
+        self,
+        prompt: str,
+        use_cache: bool = True,
+        max_scroll_attempts: int = 3,
+        scroll_distance: int = 500
+    ) -> Optional[LocateResultElement]:
+        """
+        带滚动重试的智能元素定位（增强版）
+        
+        工作流程：
+        1. 第1次：在当前视口尝试定位
+        2. 失败 → 向下滚动 500px → 第2次尝试
+        3. 失败 → 再次滚动 500px → 第3次尝试
+        4. 找到元素后自动滚动到视口中心（与 JS 版本对齐）
+        
+        Args:
+            prompt: 元素描述
+            use_cache: 是否使用缓存（第一次尝试时使用，重试时不使用）
+            max_scroll_attempts: 最大滚动尝试次数（默认3次）
+            scroll_distance: 每次滚动距离（像素，默认500）
+        
+        Returns:
+            定位结果或 None
+        """
+        logger.info(f"AI Locate with scroll retry: '{prompt}' (max_attempts={max_scroll_attempts})")
+        
+        for attempt in range(max_scroll_attempts):
+            # 尝试定位元素
+            # 第一次尝试使用缓存，后续重试不使用缓存（因为页面位置已改变）
+            should_use_cache = use_cache and (attempt == 0)
+            element = await self.ai_locate(prompt, use_cache=should_use_cache)
+            
+            if element:
+                logger.info(
+                    f"Element '{prompt}' found on attempt {attempt + 1}/{max_scroll_attempts} "
+                    f"at {element.center}"
+                )
+                return element
+            
+            # 如果还有重试机会，滚动页面
+            if attempt < max_scroll_attempts - 1:
+                logger.info(
+                    f"Element '{prompt}' not found in current viewport, "
+                    f"scrolling down {scroll_distance}px (attempt {attempt + 1}/{max_scroll_attempts})"
+                )
+                
+                # 滚动页面
+                await self.interface.scroll('down', scroll_distance)
+                
+                # 等待页面稳定
+                await asyncio.sleep(0.5)
+        
+        logger.warning(
+            f"Element '{prompt}' not found after {max_scroll_attempts} scroll attempts"
+        )
+        return None
+
+    async def ai_click(self, prompt: str, enable_scroll_retry: bool = True) -> bool:
         """
         使用 AI 定位并点击元素
 
         Args:
             prompt: 元素描述
+            enable_scroll_retry: 是否启用滚动重试（默认 True）
 
         Returns:
             是否成功
@@ -421,7 +548,12 @@ class Agent:
         if self.recorder:
             task = self.recorder.start_task("click", param=prompt)
 
-        element = await self.ai_locate(prompt)
+        # 🔑 使用滚动重试机制定位元素
+        if enable_scroll_retry:
+            element = await self.ai_locate_with_scroll_retry(prompt)
+        else:
+            element = await self.ai_locate(prompt)
+        
         if not element:
             logger.error(f"Cannot locate element: {prompt}")
             if self.recorder:
@@ -465,13 +597,14 @@ class Agent:
 
         return True
 
-    async def ai_input(self, prompt: str, text: str) -> bool:
+    async def ai_input(self, prompt: str, text: str, enable_scroll_retry: bool = True) -> bool:
         """
         使用 AI 定位并输入文本
 
         Args:
             prompt: 元素描述
             text: 要输入的文本
+            enable_scroll_retry: 是否启用滚动重试（默认 True）
 
         Returns:
             是否成功
@@ -486,7 +619,12 @@ class Agent:
         if self.recorder:
             task = self.recorder.start_task("input", param={"prompt": prompt, "text": text})
 
-        element = await self.ai_locate(prompt)
+        # 🔑 使用滚动重试机制定位元素
+        if enable_scroll_retry:
+            element = await self.ai_locate_with_scroll_retry(prompt)
+        else:
+            element = await self.ai_locate(prompt)
+        
         if not element:
             logger.error(f"Cannot locate element: {prompt}")
             if self.recorder:

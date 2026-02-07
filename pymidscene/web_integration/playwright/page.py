@@ -116,6 +116,8 @@ class WebPage(AbstractInterface):
     async def click(self, x: float, y: float) -> None:
         """
         点击指定坐标
+        
+        点击前将元素滚动到视口中心，并重新计算滚动后的视口坐标
 
         Args:
             x: X 坐标
@@ -123,7 +125,59 @@ class WebPage(AbstractInterface):
         """
         logger.debug(f"Clicking at ({x}, {y})")
 
-        await self.page.mouse.click(x, y)
+        # 将元素滚动到视口中心，并返回滚动后的新视口坐标
+        new_coords = await self.page.evaluate("""
+            (coords) => {
+                const { x, y } = coords;
+                
+                // 尝试获取元素
+                let element = document.elementFromPoint(x, y);
+                
+                // 如果元素不在当前视口内
+                if (!element) {
+                    // 先粗略滚动到坐标附近
+                    window.scrollTo({
+                        top: Math.max(0, y - window.innerHeight / 2),
+                        behavior: 'instant'
+                    });
+                    // 重新获取元素
+                    const newY = y - window.scrollY;
+                    element = document.elementFromPoint(x, newY);
+                }
+                
+                if (!element) {
+                    return null;
+                }
+                
+                // 滚动到视口中心
+                element.scrollIntoView({ 
+                    behavior: 'instant',
+                    block: 'center'
+                });
+                
+                // 🔑 关键：返回滚动后元素在视口中的新坐标
+                const rect = element.getBoundingClientRect();
+                return {
+                    x: rect.left + rect.width / 2,
+                    y: rect.top + rect.height / 2
+                };
+            }
+        """, {"x": x, "y": y})
+        
+        if new_coords:
+            # 等待滚动完成
+            await asyncio.sleep(0.15)
+            # 使用滚动后的新坐标点击
+            click_x = new_coords['x']
+            click_y = new_coords['y']
+            logger.debug(f"Scrolled: ({x}, {y}) -> ({click_x}, {click_y})")
+        else:
+            # 找不到元素，用原始坐标兜底
+            click_x = x
+            click_y = y
+            logger.warning(f"Element not found at ({x}, {y}), clicking original coords")
+
+        await self.page.mouse.click(click_x, click_y)
 
         # 等待可能的导航
         await self.wait_for_navigation()
@@ -137,6 +191,8 @@ class WebPage(AbstractInterface):
     ) -> None:
         """
         输入文本
+        
+        🔑 关键：输入前总是将元素滚动到视口中心
 
         Args:
             text: 要输入的文本
@@ -146,11 +202,53 @@ class WebPage(AbstractInterface):
         """
         logger.debug(f"Inputting text: '{text}' at ({x}, {y}), clear_first={clear_first}")
 
-        # 如果提供了坐标，先点击
+        # 如果提供了坐标，先滚动并点击
         if x is not None and y is not None:
-            # 使用 mouse.click 而不是 self.click，避免等待导航
-            await self.page.mouse.click(x, y)
-            # 等待元素聚焦
+            # 滚动元素到视口中心，并返回滚动后的新视口坐标
+            new_coords = await self.page.evaluate("""
+                (coords) => {
+                    const { x, y } = coords;
+                    let element = document.elementFromPoint(x, y);
+                    
+                    if (!element) {
+                        window.scrollTo({
+                            top: Math.max(0, y - window.innerHeight / 2),
+                            behavior: 'instant'
+                        });
+                        const newY = y - window.scrollY;
+                        element = document.elementFromPoint(x, newY);
+                    }
+                    
+                    if (!element) {
+                        return null;
+                    }
+                    
+                    // 滚动到视口中心
+                    element.scrollIntoView({ 
+                        behavior: 'instant', 
+                        block: 'center' 
+                    });
+                    
+                    // 返回滚动后的新坐标
+                    const rect = element.getBoundingClientRect();
+                    return {
+                        x: rect.left + rect.width / 2,
+                        y: rect.top + rect.height / 2
+                    };
+                }
+            """, {"x": x, "y": y})
+            
+            if new_coords:
+                await asyncio.sleep(0.15)
+                click_x = new_coords['x']
+                click_y = new_coords['y']
+                logger.debug(f"Scrolled for input: ({x}, {y}) -> ({click_x}, {click_y})")
+            else:
+                click_x = x
+                click_y = y
+            
+            # 点击元素（使用滚动后的新坐标）
+            await self.page.mouse.click(click_x, click_y)
             await asyncio.sleep(0.1)
 
         # 清空输入框内容（与 JS 版本一致）
@@ -489,6 +587,166 @@ class WebPage(AbstractInterface):
         except Exception as e:
             logger.warning(f"Failed to input by XPath: {xpath}, error: {e}")
             return False
+
+    async def scroll_element_into_view(
+        self,
+        x: float,
+        y: float,
+        block: str = 'center',
+        behavior: str = 'instant'
+    ) -> bool:
+        """
+        将指定坐标的元素滚动到视口中
+        
+        对应 JS 版本: node.scrollIntoView({ behavior: 'instant', block: 'center' })
+        
+        Args:
+            x: 元素中心 X 坐标
+            y: 元素中心 Y 坐标
+            block: 垂直对齐方式 (start/center/end/nearest)
+            behavior: 滚动行为 (instant/smooth/auto)
+        
+        Returns:
+            是否成功滚动
+        """
+        logger.debug(f"Scrolling element at ({x}, {y}) into view (block={block}, behavior={behavior})")
+        
+        try:
+            # 执行 JS 代码：获取元素并滚动到视口中心
+            result = await self.page.evaluate("""
+                (coords) => {
+                    const { x, y, block, behavior } = coords;
+                    const element = document.elementFromPoint(x, y);
+                    
+                    if (!element) {
+                        return { success: false, reason: 'Element not found at coordinates' };
+                    }
+                    
+                    // 检查元素是否在视口中
+                    const rect = element.getBoundingClientRect();
+                    const isInViewport = (
+                        rect.top >= 0 &&
+                        rect.left >= 0 &&
+                        rect.bottom <= window.innerHeight &&
+                        rect.right <= window.innerWidth
+                    );
+                    
+                    if (isInViewport) {
+                        return { success: true, reason: 'Element already in viewport', scrolled: false };
+                    }
+                    
+                    // 滚动元素到视口中心（与 JS 版本完全一致）
+                    element.scrollIntoView({ 
+                        behavior: behavior,  // 'instant' - 立即滚动，无动画
+                        block: block         // 'center' - 垂直居中
+                    });
+                    
+                    return { success: true, reason: 'Element scrolled into view', scrolled: true };
+                }
+            """, {"x": x, "y": y, "block": block, "behavior": behavior})
+            
+            if result.get('scrolled'):
+                logger.info(f"Element scrolled into view: {result.get('reason')}")
+                # 等待滚动完成
+                await asyncio.sleep(0.3)
+            else:
+                logger.debug(f"No scroll needed: {result.get('reason')}")
+            
+            return result.get('success', False)
+            
+        except Exception as e:
+            logger.warning(f"Failed to scroll element into view: {e}")
+            return False
+
+    async def scroll_element_by_xpath_into_view(
+        self,
+        xpath: str,
+        block: str = 'center',
+        behavior: str = 'instant'
+    ) -> bool:
+        """
+        通过 XPath 将元素滚动到视口中（与 JS 版本完全对齐）
+        
+        对应 JS 版本: getElementInfoByXpath 中的自动滚动逻辑
+        
+        Args:
+            xpath: 元素的 XPath 路径
+            block: 垂直对齐方式 (start/center/end/nearest)
+            behavior: 滚动行为 (instant/smooth/auto)
+        
+        Returns:
+            是否成功滚动
+        """
+        logger.debug(f"Scrolling element by XPath into view: {xpath}")
+        
+        try:
+            # 执行 JS 代码：通过 XPath 获取元素并滚动
+            result = await self.page.evaluate("""
+                (params) => {
+                    const { xpath, block, behavior } = params;
+                    
+                    // 通过 XPath 查找元素
+                    const xpathResult = document.evaluate(
+                        xpath,
+                        document,
+                        null,
+                        XPathResult.FIRST_ORDERED_NODE_TYPE,
+                        null
+                    );
+                    
+                    const element = xpathResult.singleNodeValue;
+                    
+                    if (!element || !(element instanceof Element)) {
+                        return { success: false, reason: 'Element not found or not an Element type' };
+                    }
+                    
+                    // 检查元素是否部分在视口中（与 JS 版本逻辑一致）
+                    const rect = element.getBoundingClientRect();
+                    const isPartiallyInViewport = (
+                        rect.bottom > 0 &&
+                        rect.right > 0 &&
+                        rect.top < window.innerHeight &&
+                        rect.left < window.innerWidth
+                    );
+                    
+                    if (isPartiallyInViewport) {
+                        return { success: true, reason: 'Element already partially in viewport', scrolled: false };
+                    }
+                    
+                    // 🔑 关键：滚动到视口中心（与 JS 版本完全一致）
+                    element.scrollIntoView({ 
+                        behavior: behavior,  // 'instant' - 立即滚动
+                        block: block         // 'center' - 垂直居中
+                    });
+                    
+                    return { success: true, reason: 'Element scrolled into view', scrolled: true };
+                }
+            """, {"xpath": xpath, "block": block, "behavior": behavior})
+            
+            if result.get('scrolled'):
+                logger.info(f"Element scrolled into view by XPath: {result.get('reason')}")
+                # 等待滚动完成
+                await asyncio.sleep(0.3)
+            else:
+                logger.debug(f"No scroll needed: {result.get('reason')}")
+            
+            return result.get('success', False)
+            
+        except Exception as e:
+            logger.warning(f"Failed to scroll element by XPath into view: {e}")
+            return False
+
+    async def execute_script(self, script: str) -> Any:
+        """
+        执行 JavaScript 脚本（别名方法，与 execute_javascript 一致）
+        
+        Args:
+            script: JavaScript 代码
+        
+        Returns:
+            执行结果
+        """
+        return await self.evaluate_javascript(script)
 
 
 __all__ = ["WebPage"]

@@ -4,6 +4,7 @@ AI 模型服务调用器 - 对应 packages/core/src/ai-model/service-caller/inde
 统一的 AI 模型调用入口，支持多种模型（OpenAI、千问等）。
 """
 
+import re
 from typing import Optional, Dict, Any, List, Callable
 import time
 import json
@@ -11,7 +12,13 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletion
 
 from ...shared.logger import logger
-from ...shared.utils import safe_parse_json, extract_json_from_code_block
+from ...shared.utils import (
+    safe_parse_json,
+    extract_json_from_code_block,
+    normalize_json_object,
+    preprocess_doubao_bbox_json,
+    is_ui_tars,
+)
 from ..types import AIUsageInfo
 
 
@@ -34,34 +41,56 @@ def repair_json(json_str: str) -> str:
         return json_str
 
 
-def safe_parse_json_with_repair(text: str) -> Optional[Dict[str, Any]]:
+def safe_parse_json_with_repair(
+    text: str,
+    model_family: Optional[str] = None
+) -> Optional[Any]:
     """
     安全解析 JSON，支持自动修复
+    
+    对应 JS 版本: safeParseJson (service-caller/index.ts:648-690)
 
     Args:
         text: JSON 字符串
+        model_family: 模型家族（用于特殊处理）
 
     Returns:
-        解析后的字典，失败返回 None
+        解析后的对象，失败返回 None
     """
+    clean_json_string = extract_json_from_code_block(text)
+    
+    # 匹配点坐标格式 (x,y)
+    point_match = re.match(r'\((\d+),(\d+)\)', clean_json_string)
+    if point_match:
+        return [int(point_match.group(1)), int(point_match.group(2))]
+    
     # 首先尝试直接解析
-    result = safe_parse_json(text)
-    if result is not None:
-        return result
-
-    # 尝试提取代码块
-    extracted = extract_json_from_code_block(text)
-    result = safe_parse_json(extracted)
-    if result is not None:
-        return result
+    try:
+        parsed = json.loads(clean_json_string)
+        return normalize_json_object(parsed)
+    except (json.JSONDecodeError, ValueError):
+        pass
 
     # 尝试修复后解析
     try:
-        repaired = repair_json(extracted)
-        return json.loads(repaired)
-    except Exception as e:
-        logger.error(f"Failed to parse JSON even after repair: {e}")
-        return None
+        repaired = repair_json(clean_json_string)
+        parsed = json.loads(repaired)
+        return normalize_json_object(parsed)
+    except Exception:
+        pass
+
+    # 豆包/UI-TARS 特殊处理
+    if model_family == 'doubao-vision' or is_ui_tars(model_family):
+        json_string = preprocess_doubao_bbox_json(clean_json_string)
+        try:
+            repaired = repair_json(json_string)
+            parsed = json.loads(repaired)
+            return normalize_json_object(parsed)
+        except Exception:
+            pass
+
+    logger.error(f"Failed to parse JSON: {text[:200]}...")
+    return None
 
 
 class ModelConfig:
@@ -286,6 +315,9 @@ def call_ai(
                 # 所有重试都失败
                 logger.error(f"All {max_attempts} attempts failed")
                 raise last_error
+
+    # 不应该到达这里，但为了类型检查
+    raise RuntimeError("Unexpected error in call_ai")
 
 
 def extract_json_from_response(content: str) -> Optional[Dict[str, Any]]:

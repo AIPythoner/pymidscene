@@ -35,7 +35,7 @@ async def main():
         page = await browser.new_page()
 
         # 创建 Agent（启用缓存）
-        agent = PlaywrightAgent(page, cache_id="login_demo")
+        agent = PlaywrightAgent(page)
 
         # 访问登录页面
         await page.goto(html_url)

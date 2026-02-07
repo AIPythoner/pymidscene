@@ -225,11 +225,14 @@ class DoubaoVisionModel(BaseAIModel):
     ) -> Tuple[int, int, int, int]:
         """
         适配豆包 bbox 格式到标准格式
+        
+        对应 JS 版本: adaptDoubaoBbox (common.ts:108-192)
 
         豆包支持多种 bbox 格式：
         1. 字符串："x1 y1 x2 y2" (空格分隔，0-1000 归一化坐标)
-        2. 数组：[x1, y1, x2, y2] (0-1000 归一化坐标)
-        3. 数组：[x, y] (中心点坐标，自动创建小矩形)
+        2. 字符串数组：["123 222", "789 100"] 或 ["123,222", "789,100"]
+        3. 数组：[x1, y1, x2, y2] (0-1000 归一化坐标)
+        4. 数组：[x, y] (中心点坐标，自动创建小矩形)
 
         Args:
             bbox: bbox 值（字符串或数组）
@@ -239,54 +242,9 @@ class DoubaoVisionModel(BaseAIModel):
         Returns:
             标准 bbox: (left, top, right, bottom) 像素坐标
         """
-        # 处理字符串格式："x1 y1 x2 y2"
-        if isinstance(bbox, str):
-            parts = bbox.strip().split()
-            if len(parts) == 4:
-                x1, y1, x2, y2 = map(float, parts)
-                return (
-                    round(x1 * width / 1000),
-                    round(y1 * height / 1000),
-                    round(x2 * width / 1000),
-                    round(y2 * height / 1000)
-                )
-
-        # 处理数组格式
-        if isinstance(bbox, (list, tuple)):
-            if len(bbox) == 4:
-                # 标准矩形：[x1, y1, x2, y2]
-                x1, y1, x2, y2 = bbox
-                return (
-                    round(x1 * width / 1000),
-                    round(y1 * height / 1000),
-                    round(x2 * width / 1000),
-                    round(y2 * height / 1000)
-                )
-            elif len(bbox) == 2:
-                # 中心点：[x, y] - 创建小矩形 (±5 像素)
-                x, y = bbox
-                pixel_x = round(x * width / 1000)
-                pixel_y = round(y * height / 1000)
-                return (
-                    pixel_x - 5,
-                    pixel_y - 5,
-                    pixel_x + 5,
-                    pixel_y + 5
-                )
-            elif len(bbox) == 8:
-                # 四边形格式：取外接矩形
-                xs = [bbox[i] for i in range(0, 8, 2)]
-                ys = [bbox[i] for i in range(1, 8, 2)]
-                x1, x2 = min(xs), max(xs)
-                y1, y2 = min(ys), max(ys)
-                return (
-                    round(x1 * width / 1000),
-                    round(y1 * height / 1000),
-                    round(x2 * width / 1000),
-                    round(y2 * height / 1000)
-                )
-
-        raise ValueError(f"Unsupported bbox format: {bbox}")
+        # 使用统一的工具函数
+        from ....shared.utils import adapt_doubao_bbox as _adapt_doubao_bbox
+        return _adapt_doubao_bbox(bbox, width, height)
 
     def get_model_name(self) -> str:
         """获取模型名称"""
