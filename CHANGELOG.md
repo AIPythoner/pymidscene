@@ -1,5 +1,73 @@
 # PyMidscene 更新日志
 
+## [0.1.3] - 2026-02-09
+
+### 重大变更
+
+#### 1. ai_act / ai_action 完整实现（plan-execute-replan 循环）
+- **之前**: `ai_act` 仅为 stub，`ai_action` 直接代理到 `ai_click`
+- **现在**: 完整实现 AI 规划循环，与 JS 版本 `agent.ts aiAct` + `tasks.ts runAction()` 对齐
+- AI 截图分析 → 规划动作序列（含 Scroll）→ 执行 → 重新截图 replan → 直到完成
+- 支持缓存：首次 AI 规划 → 保存为 YAML workflow；后续直接回放
+- 最大重规划次数限制（10 次，对应 JS `replanningCycleLimit`）
+
+#### 2. Planner Prompt 重构为 JSON 格式
+- **之前**: YAML 格式的规划输出
+- **现在**: JSON 格式，包含 `actions` 数组和 `shouldContinuePlanning` 标志
+- 新增 `parse_planning_response()` 解析函数
+- `plan_task_prompt()` 支持 `conversation_history` 参数用于 replan 上下文
+
+### 新增
+
+#### 3. 新增 API 方法
+- `ai_wait_for(assertion, timeout, interval)` — 轮询等待页面满足条件（对应 JS `aiWaitFor`）
+- `ai_scroll(direction, distance, scroll_type, locate_prompt)` — AI 滚动操作（对应 JS `aiScroll`）
+- `ai_action` 别名与 `ai_act` 完全等价
+- PlaywrightAgent 层同步暴露 `ai_act`、`ai_wait_for`、`ai_scroll` 方法
+
+#### 4. 双向滚动搜索（ai_locate_with_scroll_retry 增强）
+- **之前**: 仅向下滚动 3 次
+- **现在**: 向下滚动 5 次 + 回到顶部再向下搜索 2 次（覆盖页面上方区域）
+- 找到元素后通过 XPath `scrollIntoView` 自动滚动到视口中心
+
+#### 5. XPath scrollIntoView 机制
+- 新增 `_scroll_element_into_view_after_locate()` 方法
+- 定位到元素后通过 XPath 精确滚动到视口中心（对应 JS `locator.ts getElementInfoByXpath`）
+- `AbstractInterface` 新增 `scroll_element_by_xpath_into_view()` 和 `scroll_element_into_view()` 抽象方法
+
+#### 6. 动作执行引擎
+- 新增 `_execute_planned_action()` 支持 7 种动作类型：Tap、Input、Hover、Scroll、KeyboardPress、Sleep、Assert
+- 新增 `_actions_to_yaml_workflow()` 将动作序列序列化为 YAML 用于缓存
+- 新增 `_replay_cached_plan()` 回放缓存的动作序列
+
+#### 7. 小红书上传示例
+- 新增 `examples/xhs_upload.py` — 小红书视频上传自动化完整示例
+- 演示 `ai_wait_for`、`ai_action`、`ai_assert` 的实际用法
+
+#### 8. 调试定位测试工具
+- 新增 `tests/validation/test_debug_locate.py` — 在截图上标出红色框查看 AI 定位精度
+
+### 修复
+
+#### 9. API 请求重试机制
+- HTTP 请求新增指数退避重试（429/500/502/503/504），最多重试 3 次
+- 解决中转服务临时不可用导致的请求失败
+
+#### 10. ai_assert 提示词增强
+- 断言标准改为「屏幕上可见即 pass」，不要求是当前活动页面（与 JS 版本对齐）
+- 支持解析 AI 返回的 markdown 代码块包裹的 JSON
+
+#### 11. hover() 支持 scrollIntoView
+- 悬停前先将元素滚动到视口中心，与 click/input_text 行为一致
+
+#### 12. scroll() 改用 mouse.wheel
+- **之前**: 使用 `window.scrollBy`，对 SPA 内部滚动容器无效
+- **现在**: 使用 `mouse.wheel`（与 JS 版本 `base-page.ts` 对齐）
+- 默认滚动距离改为视口高度的 70%（之前为 100%）
+- 滚动前先移动鼠标到视口中心（对应 JS `moveToPointBeforeScroll`）
+
+---
+
 ## [0.1.2] - 2026-02-07
 
 ### 重大变更

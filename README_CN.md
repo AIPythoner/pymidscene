@@ -148,6 +148,9 @@ if __name__ == "__main__":
 | `ai_locate(description)` | 定位元素并返回坐标 |
 | `ai_query(schema)` | 从页面提取结构化数据 |
 | `ai_assert(assertion)` | 断言某个条件为真 |
+| `ai_action(task)` | 执行复杂任务，AI 自动规划-执行-重规划循环 |
+| `ai_wait_for(assertion, timeout)` | 等待页面满足某个条件（轮询） |
+| `ai_scroll(direction, distance)` | AI 辅助滚动页面 |
 | `finish()` | 生成 HTML 报告并返回路径 |
 
 ### 支持的模型

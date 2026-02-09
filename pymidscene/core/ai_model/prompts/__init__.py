@@ -6,7 +6,7 @@ Prompt 模板模块
 
 from .locator import system_prompt_to_locate_element, find_element_prompt
 from .extractor import system_prompt_to_extract, extract_data_prompt, parse_xml_extraction_response
-from .planner import system_prompt_to_plan
+from .planner import system_prompt_to_plan, plan_task_prompt, parse_planning_response
 
 __all__ = [
     # Locator prompts
@@ -18,4 +18,6 @@ __all__ = [
     "parse_xml_extraction_response",
     # Planner prompts
     "system_prompt_to_plan",
+    "plan_task_prompt",
+    "parse_planning_response",
 ]

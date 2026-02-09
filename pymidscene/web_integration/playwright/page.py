@@ -276,7 +276,7 @@ class WebPage(AbstractInterface):
 
     async def hover(self, x: float, y: float) -> None:
         """
-        悬停到指定坐标
+        悬停到指定坐标（带 scrollIntoView，与 JS 版本对齐）
 
         Args:
             x: X 坐标
@@ -284,26 +284,86 @@ class WebPage(AbstractInterface):
         """
         logger.debug(f"Hovering at ({x}, {y})")
 
-        await self.page.mouse.move(x, y)
+        # 先将元素滚动到视口中心（与 click/input_text 一致）
+        new_coords = await self.page.evaluate("""
+            (coords) => {
+                const { x, y } = coords;
+                let element = document.elementFromPoint(x, y);
+                
+                if (!element) {
+                    window.scrollTo({
+                        top: Math.max(0, y - window.innerHeight / 2),
+                        behavior: 'instant'
+                    });
+                    const newY = y - window.scrollY;
+                    element = document.elementFromPoint(x, newY);
+                }
+                
+                if (!element) return null;
+                
+                element.scrollIntoView({ 
+                    behavior: 'instant',
+                    block: 'center'
+                });
+                
+                const rect = element.getBoundingClientRect();
+                return {
+                    x: rect.left + rect.width / 2,
+                    y: rect.top + rect.height / 2
+                };
+            }
+        """, {"x": x, "y": y})
+
+        if new_coords:
+            await asyncio.sleep(0.15)
+            hover_x = new_coords['x']
+            hover_y = new_coords['y']
+            logger.debug(f"Scrolled for hover: ({x}, {y}) -> ({hover_x}, {hover_y})")
+        else:
+            hover_x = x
+            hover_y = y
+
+        await self.page.mouse.move(hover_x, hover_y)
 
     async def scroll(
         self,
         direction: str,
-        distance: Optional[int] = None
+        distance: Optional[int] = None,
+        starting_point: Optional[dict] = None
     ) -> None:
         """
-        滚动页面
+        滚动页面（与 JS 版本对齐，使用 mouse.wheel）
+
+        JS 版本使用 mouse.wheel 而非 window.scrollBy，这是关键区别：
+        - mouse.wheel 会滚动鼠标指针下方的实际可滚动容器（如 SPA 内部的 div）
+        - window.scrollBy 只滚动主文档窗口，对内部滚动容器无效
+
+        对应 JS: base-page.ts scrollDown/scrollUp/scrollLeft/scrollRight
 
         Args:
             direction: 滚动方向（up/down/left/right）
-            distance: 滚动距离（像素），默认为视口高度
+            distance: 滚动距离（像素），默认为视口高度的 70%（与 JS 版本一致）
+            starting_point: 滚动起点坐标 {"x": ..., "y": ...}，默认为视口中心
         """
         logger.debug(f"Scrolling {direction}, distance={distance}")
 
         if distance is None:
-            # 默认滚动一个视口的高度
+            # 默认滚动视口高度的 70%（与 JS 版本 innerHeight * 0.7 对齐）
             size = await self.get_size()
-            distance = int(size["height"])
+            if direction in ("up", "down"):
+                distance = int(size["height"] * 0.7)
+            else:
+                distance = int(size["width"] * 0.7)
+
+        # 滚动前先移动鼠标到指定位置或视口中心
+        # 对应 JS: moveToPointBeforeScroll()
+        if starting_point:
+            await self.page.mouse.move(starting_point["x"], starting_point["y"])
+        else:
+            size = await self.get_size()
+            center_x = int(size["width"] / 2)
+            center_y = int(size["height"] / 2)
+            await self.page.mouse.move(center_x, center_y)
 
         # 根据方向计算滚动量
         delta_x = 0
@@ -320,13 +380,11 @@ class WebPage(AbstractInterface):
         else:
             raise ValueError(f"Invalid scroll direction: {direction}")
 
-        # 执行滚动
-        await self.page.evaluate(
-            f"window.scrollBy({delta_x}, {delta_y})"
-        )
+        # 使用 mouse.wheel 滚动（与 JS 版本完全一致）
+        await self.page.mouse.wheel(delta_x, delta_y)
 
-        # 等待滚动完成
-        await asyncio.sleep(0.3)
+        # 等待滚动完成（与 JS 版本 sleep(500) 对齐）
+        await asyncio.sleep(0.5)
 
     async def key_press(self, key: str) -> None:
         """

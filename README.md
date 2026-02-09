@@ -148,6 +148,9 @@ if __name__ == "__main__":
 | `ai_locate(description)` | Locate an element and return its coordinates |
 | `ai_query(schema)` | Extract structured data from the page |
 | `ai_assert(assertion)` | Assert that a condition is true |
+| `ai_action(task)` | Execute a complex task with AI planning loop (plan-execute-replan) |
+| `ai_wait_for(assertion, timeout)` | Wait until a page condition is met (polling) |
+| `ai_scroll(direction, distance)` | Scroll the page with AI assistance |
 | `finish()` | Generate HTML report and return the path |
 
 ### Supported Models

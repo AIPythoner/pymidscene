@@ -187,7 +187,24 @@ class PlaywrightAgent:
 
     async def ai_action(self, action: str) -> bool:
         """
-        执行 AI 动作（别名方法，兼容 JS 版本的 aiAction）
+        执行 AI 动作（完整的 plan-execute-replan 循环）
+
+        与 JS 版本的 aiAction / aiAct 完全对齐：
+        - AI 分析截图并规划动作序列
+        - 如果目标元素不在视口中，AI 会自动规划 Scroll 动作
+        - 执行后重新截图并 replan，直到任务完成
+
+        Args:
+            action: 动作的自然语言描述（如 "点击自主声明选项的下拉选择框"）
+
+        Returns:
+            是否成功执行
+        """
+        return await self._agent.ai_act(action)
+
+    async def ai_act(self, action: str) -> bool:
+        """
+        ai_action 的别名（与 JS 版本 aiAct 对齐）
 
         Args:
             action: 动作的自然语言描述
@@ -195,7 +212,54 @@ class PlaywrightAgent:
         Returns:
             是否成功执行
         """
-        return await self._agent.ai_click(action)
+        return await self._agent.ai_act(action)
+
+    async def ai_wait_for(
+        self,
+        assertion: str,
+        timeout: float = 30,
+        interval: float = 2
+    ) -> bool:
+        """
+        等待页面满足某个条件（与 JS 版本 aiWaitFor 对齐）
+
+        轮询检查页面状态，直到断言条件满足或超时。
+
+        Args:
+            assertion: 断言条件描述（如 "页面显示了笔记管理"）
+            timeout: 超时时间（秒，默认30）
+            interval: 轮询间隔（秒，默认2）
+
+        Returns:
+            条件是否满足
+
+        Raises:
+            TimeoutError: 超时未满足条件
+        """
+        return await self._agent.ai_wait_for(assertion, timeout, interval)
+
+    async def ai_scroll(
+        self,
+        direction: str = "down",
+        distance: int = 500,
+        scroll_type: str = "singleAction",
+        locate_prompt: Optional[str] = None
+    ) -> bool:
+        """
+        AI 滚动操作（与 JS 版本 aiScroll 对齐）
+
+        Args:
+            direction: 滚动方向（up/down/left/right）
+            distance: 滚动距离（像素）
+            scroll_type: 滚动类型（singleAction/scrollToBottom/scrollToTop）
+            locate_prompt: 可选的元素描述，在该元素上滚动
+
+        Returns:
+            是否成功
+        """
+        return await self._agent.ai_scroll(
+            direction, distance, scroll_type, locate_prompt
+        )
 
     # ==================== 日志/报告方法 ====================
 

@@ -164,5 +164,50 @@ class AbstractInterface(ABC):
         # 默认实现，子类可以覆盖
         return None
 
+    async def scroll_element_by_xpath_into_view(
+        self,
+        xpath: str,
+        block: str = 'center',
+        behavior: str = 'instant'
+    ) -> bool:
+        """
+        通过 XPath 将元素滚动到视口中
+
+        对应 JS 版本: locator.ts getElementInfoByXpath 中的
+        node.scrollIntoView({ behavior: 'instant', block: 'center' })
+
+        Args:
+            xpath: 元素的 XPath 路径
+            block: 垂直对齐方式 (start/center/end/nearest)
+            behavior: 滚动行为 (instant/smooth/auto)
+
+        Returns:
+            是否成功滚动
+        """
+        # 默认实现，子类可以覆盖
+        return False
+
+    async def scroll_element_into_view(
+        self,
+        x: float,
+        y: float,
+        block: str = 'center',
+        behavior: str = 'instant'
+    ) -> bool:
+        """
+        将指定坐标的元素滚动到视口中
+
+        Args:
+            x: 元素中心 X 坐标
+            y: 元素中心 Y 坐标
+            block: 垂直对齐方式
+            behavior: 滚动行为
+
+        Returns:
+            是否成功滚动
+        """
+        # 默认实现，子类可以覆盖
+        return False
+
 
 __all__ = ["AbstractInterface"]
