@@ -170,14 +170,107 @@ class Agent:
         """
         使用配置调用 AI
         
-        支持两种调用方式：
-        1. httpx 直接请求（适用于反代、Gemini 等）- 更兼容
-        2. OpenAI SDK（适用于标准 OpenAI 兼容 API）- 备用
+        根据 model_family 自动选择调用方式：
+        - gemini: 使用 google-genai SDK（原生 Gemini 协议）
+        - 其他: 使用 httpx 直接请求（OpenAI 兼容协议）
         """
         config = self._get_model_config(intent)
 
-        # 统一使用 httpx 直接请求，更兼容各种反代和 API 格式
-        return self._call_with_httpx(config, messages)
+        if config.model_family == 'gemini':
+            return self._call_with_gemini_sdk(config, messages)
+        else:
+            return self._call_with_httpx(config, messages)
+
+    def _call_with_gemini_sdk(
+        self,
+        config: ModelConfig,
+        messages: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        使用 google-genai SDK 调用 Gemini API（原生协议）
+        
+        自动处理：URL 拼接、认证、协议格式、重试
+        支持：官方 API、中转站、反代 —— 只需配置 base_url
+        """
+        from google import genai
+        from google.genai.types import HttpOptions
+
+        base_url = (config.openai_base_url or "").rstrip("/")
+        if not base_url:
+            raise ValueError("MIDSCENE_MODEL_BASE_URL is required")
+
+        client = genai.Client(
+            api_key=config.openai_api_key,
+            http_options=HttpOptions(base_url=base_url),
+        )
+
+        # 将 OpenAI 格式的 messages 转换为 Gemini contents 格式
+        contents = self._convert_messages_to_gemini_contents(messages)
+
+        logger.info(f"Calling Gemini API via google-genai SDK: model={config.model_name}, base_url={base_url}")
+
+        response = client.models.generate_content(
+            model=config.model_name,
+            contents=contents,
+        )
+
+        content = response.text or ""
+        usage = None
+        if response.usage_metadata:
+            usage = {
+                "prompt_tokens": response.usage_metadata.prompt_token_count,
+                "completion_tokens": response.usage_metadata.candidates_token_count,
+                "total_tokens": response.usage_metadata.total_token_count,
+            }
+
+        return {
+            "content": content,
+            "usage": usage,
+            "raw_response": None,
+        }
+    def _convert_messages_to_gemini_contents(
+        self,
+        messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        将 OpenAI 格式的 messages 转换为 Gemini contents 格式
+        
+        OpenAI: [{role, content: str | [{type: text/image_url, ...}]}]
+        Gemini: [{role, parts: [{text} | {inline_data: {mime_type, data}}]}]
+        """
+        contents = []
+        for msg in messages:
+            role = msg.get('role', 'user')
+            if role == 'system':
+                # Gemini 没有 system role，合并到 user
+                role = 'user'
+            elif role == 'assistant':
+                role = 'model'
+            raw_content = msg.get('content', '')
+            parts = []
+            if isinstance(raw_content, str):
+                parts.append({'text': raw_content})
+            elif isinstance(raw_content, list):
+                for item in raw_content:
+                    if item.get('type') == 'text':
+                        parts.append({'text': item.get('text', '')})
+                    elif item.get('type') == 'image_url':
+                        image_url = item.get('image_url', {}).get('url', '')
+                        if image_url.startswith('data:'):
+                            # data:image/png;base64,xxxx
+                            header, b64data = image_url.split(',', 1)
+                            mime = header.split(':')[1].split(';')[0]
+                            parts.append({
+                                'inline_data': {
+                                    'mime_type': mime,
+                                    'data': b64data,
+                                }
+                            })
+                        else:
+                            parts.append({'text': f'[image: {image_url}]'})
+            if parts:
+                contents.append({'role': role, 'parts': parts})
+        return contents
 
     def _call_with_httpx(
         self,
@@ -185,29 +278,19 @@ class Agent:
         messages: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        使用 httpx 直接请求（参考 GeminiHttpClient 实现）
+        使用 httpx 直接请求（OpenAI 兼容协议）
         
-        兼容：
-        - Gemini 反代（OpenAI 兼容格式）
-        - 豆包/千问等 OpenAI 兼容 API
-        - 任何 OpenAI 格式的反代服务
+        适用于：豆包、千问等 OpenAI 兼容 API
         """
         import httpx
 
-        # 构造请求 URL
         base = (config.openai_base_url or "").rstrip("/")
         if not base:
             raise ValueError("MIDSCENE_MODEL_BASE_URL is required")
-        
-        # 智能拼接 URL：
-        # 1. 如果 base_url 已经包含版本路径（/v1, /v2, /v3 等），直接拼 /chat/completions
-        # 2. 否则自动加 /v1/chat/completions（适用于反代）
         import re as _re
-        if _re.search(r'/v\d+$', base):
-            # 已经包含版本路径：/v1, /v3 等
+        if _re.search(r'/v\d+[a-z]*$', base):
             url = f"{base}/chat/completions"
         else:
-            # 没有版本路径，自动加 /v1（适用于反代）
             url = f"{base}/v1/chat/completions"
         
         logger.debug(f"Request URL: {url}")
