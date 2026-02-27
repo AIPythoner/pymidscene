@@ -1,5 +1,27 @@
 # PyMidscene 更新日志
 
+## [0.1.4] - 2026-02-27
+
+### 重大变更
+
+#### 1. Gemini 模型改用 google-genai SDK（原生协议）
+- **问题**: 之前所有模型统一走 OpenAI 兼容协议（`/v1/chat/completions`），Gemini 中转站实际走的是 Gemini 原生协议（`/v1beta/models/{model}:generateContent`），导致 400/404 错误
+- **修复**: 当 `model_family=gemini` 时，自动使用 Google 官方 `google-genai` SDK 调用
+- SDK 自动处理：URL 拼接、认证方式、协议格式、重试机制
+- 支持：Gemini 官方 API、第三方中转站、反代 —— 只需配置 `MIDSCENE_MODEL_BASE_URL`
+- 新增 `_call_with_gemini_sdk()` 方法和 `_convert_messages_to_gemini_contents()` 消息格式转换
+- 非 Gemini 模型（豆包、千问等）仍走原有的 OpenAI 兼容 httpx 请求
+
+### 新增
+
+- `google-genai` 加入项目依赖（`pyproject.toml`）
+- OpenAI messages 格式自动转换为 Gemini contents 格式（含 base64 图片转 inline_data）
+
+### 配置变更
+
+- Gemini 用户的 `.env` 配置简化，`MIDSCENE_MODEL_BASE_URL` 只需填中转站/API 前缀，无需手动拼版本路径
+- 示例：`MIDSCENE_MODEL_BASE_URL=https://code.newcli.com/gemini`
+
 ## [0.1.3] - 2026-02-09
 
 ### 重大变更
