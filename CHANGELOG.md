@@ -1,5 +1,22 @@
 # PyMidscene 更新日志
 
+## [0.1.5] - 2026-04-14
+
+### 修复
+
+#### 1. 官方风格 HTML 报告可直接本地打开
+- **问题**: 之前 Python 版报告会依赖作者本机的 JS 模板路径，普通用户环境找不到模板时会退化成提示页，或只生成一个 HTML 但缺少运行所需静态资源
+- **修复**: 将官方风格报告模板作为 package data 内置到 `pymidscene`
+- 运行时改为从包内资源加载报告模板，不再依赖本机 JS 项目路径
+- 生成报告时继续注入 `midscene_web_dump` 数据，保持与上游模板兼容
+- 保存 official-style 报告时，会把 `static/wasm` 等模板依赖资源一并写入报告目录，避免 HTML 能生成但浏览器加载资源失败
+- 如果 official-style 报告生成或保存失败，会自动回退到 Python 原生 HTML 报告，而不是停留在模板加载失败提示页
+
+### 新增
+
+- 新增 `pymidscene.core.report_template_resources`，统一管理 vendored 报告模板与静态资源
+- 新增报告相关聚焦测试、打包 smoke 测试和官方风格报告 golden sample 回归样本
+
 ## [0.1.4] - 2026-02-27
 
 ### 重大变更
