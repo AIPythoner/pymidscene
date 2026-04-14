@@ -424,8 +424,15 @@ class SessionRecorder:
         """
         # 优先使用 JS React 报告生成器
         if self.use_js_react_report and self.js_react_generator:
-            return self._generate_js_react_report()
-        
+            try:
+                return self._generate_js_react_report()
+            except Exception as exc:
+                logger.warning(
+                    "Official-style report generation failed; "
+                    "falling back to Python-native HTML report: %s",
+                    exc,
+                )
+
         session = self._build_report_session()
         return self.report_generator.generate(session)
     
@@ -500,8 +507,15 @@ class SessionRecorder:
         """
         # 优先使用 JS React 报告生成器
         if self.use_js_react_report and self.js_react_generator:
-            return self._save_js_react_report(filename)
-        
+            try:
+                return self._save_js_react_report(filename)
+            except Exception as exc:
+                logger.warning(
+                    "Official-style report save failed; "
+                    "falling back to Python-native HTML report: %s",
+                    exc,
+                )
+
         session = self._build_report_session()
         return self.report_generator.save(
             session,

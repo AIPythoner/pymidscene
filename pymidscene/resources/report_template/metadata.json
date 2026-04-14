@@ -1,0 +1,21 @@
+{
+  "template_entrypoint": "report.html",
+  "official_report_compat_version": "upstream-dist-v1",
+  "source": {
+    "upstream_project": "web-infra-dev/midscene",
+    "artifact": "apps/report/dist/index.html",
+    "artifact_path": "E:/AI/midscene-to-python/midscene-main/apps/report/dist/index.html",
+    "companion_assets_copied": [
+      "static/wasm/9e906fbf.module.wasm"
+    ],
+    "companion_assets_observed_but_not_copied": [
+      "static/js/748.156afc6d.js.LICENSE.txt",
+      "static/js/index.876fcc28.js.LICENSE.txt",
+      "static/js/lib-react.048a7f0e.js.LICENSE.txt"
+    ]
+  },
+  "provenance": {
+    "vendored_without_rebuild": true,
+    "notes": "Built upstream report dist artifact vendored for package-resource compatibility in Task 2."
+  }
+}

@@ -8,6 +8,11 @@ license = "MIT"
 homepage = "https://github.com/AIPythoner/pymidscene"
 repository = "https://github.com/AIPythoner/pymidscene"
 documentation = "https://midscenejs.com"
+include = [
+    { path = "pymidscene/resources/report_template/report.html", format = ["sdist", "wheel"] },
+    { path = "pymidscene/resources/report_template/metadata.json", format = ["sdist", "wheel"] },
+    { path = "pymidscene/resources/report_template/static/wasm/9e906fbf.module.wasm", format = ["sdist", "wheel"] },
+]
 keywords = ["midscene", "ai", "automation", "ui-testing", "playwright", "natural-language", "browser-automation", "vision-llm", "rpa"]
 classifiers = [
     "Development Status :: 3 - Alpha",

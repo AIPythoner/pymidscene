@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 JS React 报告生成器 - 使用 JS 版本的 React 前端模板
 
@@ -15,16 +14,18 @@ JS React 报告生成器 - 使用 JS 版本的 React 前端模板
 """
 
 import json
-import uuid
 import time
-import re
-import os
-from datetime import datetime
-from typing import List, Optional, Dict, Any
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional, cast
 
 from ..shared.logger import logger
+from .report_template_resources import (
+    load_report_template,
+    materialize_report_template_static_assets,
+)
 
 
 def _escape_script_tag(content: str) -> str:
@@ -35,6 +36,7 @@ def _escape_script_tag(content: str) -> str:
 @dataclass
 class MatchedElement:
     """匹配的元素信息 - 与 JS 版本 LocateResultElement 对齐"""
+    description: str = ""
     id: str = ""
     reason: str = ""
     text: str = ""
@@ -42,12 +44,13 @@ class MatchedElement:
     rect: Optional[Dict[str, int]] = None  # {left, top, width, height}
     center: Optional[List[int]] = None  # [x, y]
 
-    def to_dict(self) -> dict:
-        result = {
+    def to_dict(self) -> dict[str, Any]:
+        result = cast(dict[str, Any], {
+            "description": self.description,
             "id": self.id,
             "reason": self.reason,
             "text": self.text,
-        }
+        })
         if self.indexId is not None:
             result["indexId"] = self.indexId
         if self.rect:
@@ -230,11 +233,9 @@ class JSReactReportGenerator:
     
     # JS 版本模板的缓存
     _js_template_cache: Optional[str] = None
-    
-    # 可能的 JS 模板源路径
-    JS_TEMPLATE_SOURCES = [
-        r"E:\code\qinghu\js-rpa-script\node_modules\@midscene\core\dist\lib\utils.js",
-    ]
+
+    # 保留该属性以兼容旧测试/调用方；模板加载已不再使用本地路径扫描。
+    JS_TEMPLATE_SOURCES: List[str] = []
     
     def __init__(self):
         """初始化报告生成器"""
@@ -244,9 +245,7 @@ class JSReactReportGenerator:
         
     def _load_js_template(self) -> Optional[str]:
         """
-        从 JS 版本加载 React HTML 模板
-        
-        模板包含完整的 React + Ant Design 组件代码
+        从包内 vendored 资源加载 React HTML 模板
         """
         if self._js_template is not None:
             return self._js_template
@@ -254,90 +253,19 @@ class JSReactReportGenerator:
         if JSReactReportGenerator._js_template_cache is not None:
             self._js_template = JSReactReportGenerator._js_template_cache
             return self._js_template
-        
-        # 尝试从已有的 JS 报告文件中提取模板
-        js_report_patterns = [
-            r"E:\code\qinghu\js-rpa-script\agents\ai-demo\midscene_run\report\*.html",
-            r"E:\code\qinghu\js-rpa-script\*\midscene_run\report\*.html",
-        ]
-        
-        import glob
-        for pattern in js_report_patterns:
-            files = glob.glob(pattern)
-            if files:
-                # 使用最新的报告文件
-                latest_file = max(files, key=os.path.getmtime)
-                try:
-                    with open(latest_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    # 找到真正的数据注入位置
-                    # JS 报告结构: ...JS代码...</script></body>\n</html>\n<script type="midscene_web_dump">
-                    # 注意：JS代码中可能包含 "</html>" 字符串，需要找到真正的 HTML 结束标签
-                    
-                    # 方法1: 查找 </script></body> 后面紧跟的 </html>（真正的 HTML 结束）
-                    # 真正的结构是: ...</script></body>\n</html>\n<script type="midscene_web_dump">
-                    real_end_match = re.search(r'</script>\s*</body>\s*\n</html>\s*\n', content)
-                    if real_end_match:
-                        # 模板截取到 </html> 结束（包含换行）
-                        template_end = real_end_match.end()
-                        template = content[:template_end].rstrip() + '\n'
-                        # 确保模板以 </html> 结尾
-                        if '</html>' in template[-20:]:
-                            JSReactReportGenerator._js_template_cache = template
-                            self._js_template = template
-                            logger.info(f"Loaded JS React template from: {latest_file}")
-                            return template
-                    
-                    # 方法2: 查找带换行符的数据脚本标签，往前截取
-                    data_match = re.search(r'\n</html>\s*\n<script type="midscene_web_dump"', content)
-                    if data_match:
-                        # 找到 </html> 的结束位置
-                        template_end = content.find('</html>', data_match.start()) + len('</html>')
-                        template = content[:template_end]
-                        JSReactReportGenerator._js_template_cache = template
-                        self._js_template = template
-                        logger.info(f"Loaded JS React template from: {latest_file}")
-                        return template
-                    
-                    # 方法3: 使用 rfind 找最后一个 </html>
-                    last_html_end = content.rfind('</html>')
-                    if last_html_end > 0:
-                        template = content[:last_html_end + len('</html>')]
-                        JSReactReportGenerator._js_template_cache = template
-                        self._js_template = template
-                        logger.info(f"Loaded JS React template from: {latest_file} (using rfind)")
-                        return template
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to load template from {latest_file}: {e}")
-        
-        # 尝试从 utils.js 中提取模板
-        for source_path in self.JS_TEMPLATE_SOURCES:
-            if os.path.exists(source_path):
-                try:
-                    with open(source_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    # 提取 getReportTpl() 函数中的模板
-                    match = re.search(
-                        r'/\*REPORT_HTML_REPLACED\*/\s*"(.*?)";\s*return\s+reportTpl',
-                        content,
-                        re.DOTALL
-                    )
-                    if match:
-                        template = match.group(1)
-                        # 解码转义字符
-                        template = template.encode('utf-8').decode('unicode_escape')
-                        JSReactReportGenerator._js_template_cache = template
-                        self._js_template = template
-                        logger.info(f"Loaded JS React template from: {source_path}")
-                        return template
-                except Exception as e:
-                    logger.warning(f"Failed to load template from {source_path}: {e}")
-        
-        logger.warning("Could not load JS React template, using fallback")
-        return None
+
+        try:
+            template = load_report_template().html
+        except Exception as exc:
+            logger.warning(
+                f"Could not load vendored report template resources, using fallback: {exc}"
+            )
+            return None
+
+        JSReactReportGenerator._js_template_cache = template
+        self._js_template = template
+        logger.info("Loaded JS React template from packaged report_template resources")
+        return template
     
     def _get_fallback_template(self) -> str:
         """获取回退模板（当无法加载 JS 模板时使用）"""
@@ -399,9 +327,7 @@ class JSReactReportGenerator:
             tasks=[],
             logTime=int(time.time() * 1000),
         )
-        
-        self._current_dump.executions.append(self._current_execution)
-    
+
     def add_task(
         self,
         task_type: str,
@@ -485,6 +411,7 @@ class JSReactReportGenerator:
         matched_element = None
         if element_rect or element_center:
             matched_element = [MatchedElement(
+                description=element_text or prompt or "",
                 id=str(uuid.uuid4())[:8],
                 reason=prompt or "",
                 text=element_text or "",
@@ -621,7 +548,7 @@ class JSReactReportGenerator:
         生成数据注入的 script 标签
         
         格式与 JS 版本完全一致:
-        <script type="midscene_web_dump" type="application/json">
+        <script type="midscene_web_dump">
         {JSON数据}
         </script>
         """
@@ -637,7 +564,7 @@ class JSReactReportGenerator:
         
         escaped_json = _escape_script_tag(data_json)
         
-        return f'<script type="midscene_web_dump" type="application/json">\n{escaped_json}\n</script>'
+        return f'<script type="midscene_web_dump">\n{escaped_json}\n</script>'
     
     def generate_html(self) -> str:
         """
@@ -701,6 +628,9 @@ class JSReactReportGenerator:
         
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
+
+        if "static/" in html_content:
+            materialize_report_template_static_assets(report_path)
         
         logger.info(f"Report saved to: {file_path}")
         return str(file_path)
