@@ -26,8 +26,9 @@ PlaywrightAgent - 对应 JS 版本的 PlaywrightAgent
     # 退出时自动调用 finish()
 """
 
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any
 from playwright.async_api import Page as AsyncPlaywrightPage
+from ...shared.types import LocateResultElement
 
 try:
     from playwright.sync_api import Page as SyncPlaywrightPage
@@ -80,7 +81,7 @@ class PlaywrightAgent:
 
     def __init__(
         self,
-        page: Union[AsyncPlaywrightPage, "SyncPlaywrightPage"],
+        page: Any,
         model_config: Optional[Dict[str, Any]] = None,
         cache_id: Optional[str] = None,
         cache_strategy: str = "read-write",
@@ -118,7 +119,7 @@ class PlaywrightAgent:
 
     # ==================== 核心 AI 方法 ====================
 
-    async def ai_locate(self, description: str) -> Optional[Dict[str, Any]]:
+    async def ai_locate(self, description: str) -> Optional[LocateResultElement]:
         """
         AI 元素定位
 
@@ -157,22 +158,22 @@ class PlaywrightAgent:
 
     async def ai_query(
         self,
-        data_schema: Union[str, Dict[str, str]],
-        data_description: Optional[str] = None
+        data_schema: str | Dict[str, str],
+        use_cache: bool = True,
     ) -> Dict[str, Any]:
         """
         AI 数据提取
 
         Args:
             data_schema: 数据结构定义
-            data_description: 数据描述
+            use_cache: 是否使用缓存
 
         Returns:
             提取的结构化数据
         """
-        return await self._agent.ai_query(data_schema, data_description)
+        return await self._agent.ai_query(data_schema, use_cache)
 
-    async def ai_assert(self, assertion: str, error_message: Optional[str] = None):
+    async def ai_assert(self, assertion: str, error_message: Optional[str] = None) -> bool:
         """
         AI 断言
 
@@ -183,7 +184,7 @@ class PlaywrightAgent:
         Raises:
             AssertionError: 断言失败时抛出
         """
-        return await self._agent.ai_assert(assertion, error_message)
+        return await self._agent.ai_assert(assertion, error_message or "")
 
     async def ai_action(self, action: str) -> bool:
         """
@@ -260,6 +261,15 @@ class PlaywrightAgent:
         return await self._agent.ai_scroll(
             direction, distance, scroll_type, locate_prompt
         )
+
+    async def wait_for_network_idle(self, timeout: int = 1000) -> None:
+        """
+        等待网络空闲（与 JS 版本 PlaywrightAgent.waitForNetworkIdle 对齐）
+
+        Args:
+            timeout: 超时时间（毫秒）
+        """
+        await self._web_page.wait_for_network_idle(timeout)
 
     # ==================== 日志/报告方法 ====================
 
