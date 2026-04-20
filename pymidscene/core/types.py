@@ -5,7 +5,7 @@
 """
 
 from typing import TypedDict, Optional, List, Dict, Any, Callable, Tuple, Protocol, Literal
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from abc import ABC, abstractmethod
 
 from ..shared.types import (
@@ -177,7 +177,7 @@ class ExecutionDump:
     ai_act_context: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典（用于序列化）"""
+        """Serialize into a JS-visualizer-compatible dict (camelCase keys)."""
         return {
             "logTime": self.log_time,
             "name": self.name,
@@ -187,24 +187,149 @@ class ExecutionDump:
         }
 
     def _task_to_dict(self, task: ExecutionTask) -> Dict[str, Any]:
-        """将任务转换为字典"""
-        # 简化实现，实际需要处理所有字段
-        return {
+        """
+        Convert ExecutionTask → dict with all fields aligned to JS schema.
+        Mirrors JS ``ExecutionTask.toJSON`` from
+        ``midscene-main/packages/core/src/types.ts``.
+        """
+        result: Dict[str, Any] = {
             "type": task.type,
             "status": task.status,
-            "param": task.param,
-            # ... 其他字段
         }
+        if task.sub_type is not None:
+            result["subType"] = task.sub_type
+        if task.sub_task:
+            result["subTask"] = task.sub_task
+        if task.param is not None:
+            result["param"] = task.param
+        if task.thought is not None:
+            result["thought"] = task.thought
+        if task.ui_context is not None:
+            # UIContext 已经有 to_dict / asdict 能力 —— 尽力序列化,失败则塞原对象
+            result["uiContext"] = (
+                task.ui_context.to_dict()
+                if hasattr(task.ui_context, "to_dict")
+                else task.ui_context
+            )
+        if task.output is not None:
+            result["output"] = task.output
+        if task.log is not None:
+            result["log"] = task.log
+        if task.error_message is not None:
+            result["errorMessage"] = task.error_message
+        if task.error_stack is not None:
+            result["errorStack"] = task.error_stack
+        if task.error is not None:
+            # Exception 对象不可直接 JSON 化,取字符串表示
+            result["error"] = str(task.error)
+        if task.recorder:
+            result["recorder"] = [
+                {
+                    "type": item.type,
+                    "ts": item.ts,
+                    "screenshot": (
+                        item.screenshot.to_dict()
+                        if item.screenshot
+                        and hasattr(item.screenshot, "to_dict")
+                        else (
+                            {"base64": item.screenshot.base64}
+                            if item.screenshot
+                            and hasattr(item.screenshot, "base64")
+                            else None
+                        )
+                    ),
+                    "timing": item.timing,
+                }
+                for item in task.recorder
+            ]
+        if task.hit_by is not None:
+            # dataclass → dict;注意 from_ 字段要映射回 JS 的 `from`
+            result["hitBy"] = {
+                "from": task.hit_by.from_,
+                "context": task.hit_by.context,
+            }
+        if task.timing is not None:
+            result["timing"] = (
+                task.timing.to_dict()
+                if hasattr(task.timing, "to_dict")
+                else asdict(task.timing)
+            )
+        if task.usage is not None:
+            result["usage"] = (
+                task.usage.to_dict()
+                if hasattr(task.usage, "to_dict")
+                else asdict(task.usage)
+            )
+        if task.search_area_usage is not None:
+            result["searchAreaUsage"] = (
+                task.search_area_usage.to_dict()
+                if hasattr(task.search_area_usage, "to_dict")
+                else asdict(task.search_area_usage)
+            )
+        if task.reasoning_content is not None:
+            result["reasoningContent"] = task.reasoning_content
+        return result
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> 'ExecutionDump':
-        """从字典创建实例"""
+        """Round-trip deserialize a dict produced by ``to_dict`` (or the JS visualizer)."""
+        tasks: List[ExecutionTask] = []
+        for raw in data.get("tasks", []) or []:
+            tasks.append(ExecutionDump._task_from_dict(raw))
         return ExecutionDump(
-            log_time=data["logTime"],
-            name=data["name"],
+            log_time=data.get("logTime", 0),
+            name=data.get("name", ""),
             description=data.get("description"),
-            tasks=[],  # 需要实现完整的反序列化
+            tasks=tasks,
             ai_act_context=data.get("aiActContext"),
+        )
+
+    @staticmethod
+    def _task_from_dict(raw: Dict[str, Any]) -> 'ExecutionTask':
+        recorder_items: List[ExecutionRecorderItem] = []
+        for item in raw.get("recorder", []) or []:
+            shot_raw = item.get("screenshot")
+            shot: Optional[ScreenshotItem] = None
+            if isinstance(shot_raw, dict):
+                shot = ScreenshotItem(shot_raw.get("base64", ""))
+            elif isinstance(shot_raw, str):
+                shot = ScreenshotItem(shot_raw)
+            recorder_items.append(
+                ExecutionRecorderItem(
+                    type=item.get("type", "screenshot"),
+                    ts=item.get("ts", 0.0),
+                    screenshot=shot,
+                    timing=item.get("timing"),
+                )
+            )
+
+        hit_by_raw = raw.get("hitBy")
+        hit_by: Optional[ExecutionTaskHitBy] = None
+        if isinstance(hit_by_raw, dict):
+            hit_by = ExecutionTaskHitBy(
+                from_=hit_by_raw.get("from", ""),
+                context=hit_by_raw.get("context") or {},
+            )
+
+        return ExecutionTask(
+            type=raw.get("type", "Action"),  # type: ignore[arg-type]
+            sub_type=raw.get("subType"),
+            sub_task=bool(raw.get("subTask", False)),
+            param=raw.get("param"),
+            thought=raw.get("thought"),
+            ui_context=raw.get("uiContext"),
+            status=raw.get("status", "pending"),  # type: ignore[arg-type]
+            error=None,  # Exception 对象无法从文本还原;仅保留 message/stack
+            error_message=raw.get("errorMessage"),
+            error_stack=raw.get("errorStack"),
+            output=raw.get("output"),
+            log=raw.get("log"),
+            recorder=recorder_items,
+            hit_by=hit_by,
+            timing=raw.get("timing"),
+            usage=raw.get("usage"),
+            search_area_usage=raw.get("searchAreaUsage"),
+            reasoning_content=raw.get("reasoningContent"),
         )
 
 

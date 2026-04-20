@@ -7,11 +7,54 @@
 from typing import Optional, Dict, Any, List, Callable, Literal, Set
 from dataclasses import dataclass, field
 from pathlib import Path
+import hashlib
+import os
 import yaml
 import json
 
 from ...shared.logger import logger
 from ...shared.utils import calculate_hash
+
+
+# 与 JS task-cache.ts:49 对齐 —— JS 会拒绝低于此版本的缓存记录.
+# 写入时以此为下限,使 Python 产出的缓存可以被 JS 读取.
+_JS_LOWEST_SUPPORTED_VERSION = "0.17.0"
+
+
+def _sha256_hex(text: str) -> str:
+    """sha256 摘要 —— 与 JS `generateHashId` 对齐的 hash 算法."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _get_cache_max_filename_length() -> int:
+    """读取 MIDSCENE_CACHE_MAX_FILENAME_LENGTH,失败回落到 200 (与 JS 对齐)."""
+    raw = os.environ.get("MIDSCENE_CACHE_MAX_FILENAME_LENGTH")
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return 200
+
+
+def _get_default_cache_dir() -> str:
+    """读取 MIDSCENE_RUN_DIR,失败回落到 ./midscene_run (与 JS 对齐)."""
+    run_dir = os.environ.get("MIDSCENE_RUN_DIR") or "./midscene_run"
+    return os.path.join(run_dir, "cache")
+
+
+def _resolve_midscene_version() -> str:
+    """
+    Resolve cache file's `midsceneVersion` to a value JS readers will accept.
+
+    JS task-cache.ts:242-249 rejects anything below `0.16.10`. pymidscene's
+    own package version is orthogonal (currently 0.1.x), so writing it raw
+    would make every Python-produced cache invalid to JS. We floor to
+    `_JS_LOWEST_SUPPORTED_VERSION` to preserve interoperability.
+    """
+    return _JS_LOWEST_SUPPORTED_VERSION
 
 
 # 缓存类型定义
@@ -55,7 +98,8 @@ class TaskCache:
 
     CACHE_FILE_EXT = ".cache.yaml"
     DEFAULT_CACHE_MAX_FILENAME_LENGTH = 200
-    MIDSCENE_VERSION = "1.0.0"  # 与 JS 版本对齐
+    # 写入时使用的 midsceneVersion,需保证 >= JS 最低支持版本 (0.16.10)
+    MIDSCENE_VERSION = _resolve_midscene_version()
 
     def __init__(
         self,
@@ -81,10 +125,12 @@ class TaskCache:
         # 清理缓存 ID（移除非法字符）
         safe_cache_id = self._sanitize_cache_id(cache_id)
 
-        # 限制文件名长度
-        if len(safe_cache_id.encode('utf-8')) > self.DEFAULT_CACHE_MAX_FILENAME_LENGTH:
+        # 限制文件名长度 (MIDSCENE_CACHE_MAX_FILENAME_LENGTH 与 JS 对齐)
+        max_filename_length = _get_cache_max_filename_length()
+        if len(safe_cache_id.encode('utf-8')) > max_filename_length:
             prefix = safe_cache_id[:32]
-            hash_suffix = calculate_hash(safe_cache_id)[:8]
+            # 与 JS `generateHashId` 对齐 —— 使用 sha256 前 8 位以保证跨语言 hash 一致
+            hash_suffix = _sha256_hex(safe_cache_id)[:8]
             safe_cache_id = f"{prefix}-{hash_suffix}"
 
         self.cache_id = safe_cache_id
@@ -104,13 +150,17 @@ class TaskCache:
             self.cache_file_path = Path(cache_file_path)
         else:
             if cache_dir is None:
-                # 与 JS 版本保持一致，使用 midscene_run/cache 目录
-                cache_dir = "./midscene_run/cache"
+                # 优先读 MIDSCENE_RUN_DIR,否则 ./midscene_run/cache (与 JS 对齐)
+                cache_dir = _get_default_cache_dir()
             cache_dir_path = Path(cache_dir)
             cache_dir_path.mkdir(parents=True, exist_ok=True)
             self.cache_file_path = cache_dir_path / f"{self.cache_id}{self.CACHE_FILE_EXT}"
 
-        # 加载或初始化缓存
+        # 加载或初始化缓存.
+        # - read-only / read-write:载入已有文件,`match_cache` 能从中匹配
+        # - write-only:不载入(匹配逻辑也不会拿到旧记录,`is_cache_result_used=False`),
+        #   但 `append_cache → _flush_cache_to_file` 会在写入时读回原文件再 merge,
+        #   因此旧记录不会被覆盖丢失.这与 JS `updateOrAppendCacheRecord` 对齐.
         cache_content: Optional[CacheFileContent] = None
         if not self.write_only_mode:
             cache_content = self._load_cache_from_file()
@@ -275,10 +325,19 @@ class TaskCache:
                         yaml_workflow=item.get("yamlWorkflow", "")
                     ))
                 elif item.get("type") == "locate":
+                    # 兼容 JS 旧版格式: 顶层 `xpaths` 自动迁移到 `cache.xpaths`
+                    # 对应 JS task-cache.ts:138-146
+                    cache_blob = item.get("cache")
+                    legacy_xpaths = item.get("xpaths")
+                    if legacy_xpaths and not cache_blob:
+                        cache_blob = {"xpaths": legacy_xpaths}
+                        logger.debug(
+                            f"Migrated legacy locate xpaths for '{item.get('prompt')}'"
+                        )
                     cache_content.caches.append(LocateCache(
                         type="locate",
                         prompt=item.get("prompt", ""),
-                        cache=item.get("cache")
+                        cache=cache_blob,
                     ))
 
             logger.info(
@@ -335,14 +394,24 @@ class TaskCache:
         # 确保目录存在
         self.cache_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 转换为可序列化的字典（与 JS 版本对齐：midsceneVersion）
+        # write-only 模式:flush 前先从磁盘读回旧记录,和内存里新增的合并后再写.
+        # 对齐 JS `updateOrAppendCacheRecord` —— 保证 write-only 不会把别的进程或
+        # 上一轮写的旧记录覆盖丢失.
+        merged_records: list[PlanningCache | LocateCache] = []
+        if self.write_only_mode and self.cache_file_path.exists():
+            existing = self._load_cache_from_file()
+            if existing and existing.caches:
+                merged_records.extend(existing.caches)
+        merged_records.extend(self.cache.caches)
+
+        # 转换为可序列化的字典(与 JS 版本对齐:midsceneVersion)
         data = {
             "midsceneVersion": self.cache.midscene_version,
             "cacheId": self.cache.cache_id,
             "caches": []
         }
 
-        for cache_item in self.cache.caches:
+        for cache_item in merged_records:
             if isinstance(cache_item, PlanningCache):
                 data["caches"].append({
                     "type": "plan",

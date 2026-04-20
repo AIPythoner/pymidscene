@@ -2,7 +2,6 @@
 测试工具函数
 """
 
-import pytest
 from pymidscene.shared.utils import (
     calculate_hash,
     safe_parse_json,
@@ -14,14 +13,19 @@ from pymidscene.shared.utils import (
 
 
 def test_calculate_hash():
-    """测试哈希计算"""
+    """Hash 使用 SHA-256(与 JS generateHashId 对齐,跨语言 byte-identical)."""
     text = "hello world"
     hash_value = calculate_hash(text)
     assert isinstance(hash_value, str)
-    assert len(hash_value) == 32  # MD5 哈希长度
+    assert len(hash_value) == 64  # SHA-256 hex 长度
 
     # 相同输入应该产生相同哈希
     assert calculate_hash(text) == hash_value
+    # 固定向量验证
+    assert (
+        calculate_hash("hello world")
+        == "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    )
 
 
 def test_safe_parse_json():
@@ -71,8 +75,8 @@ def test_format_bbox():
 
     assert rect["left"] == 10.0
     assert rect["top"] == 20.0
-    assert rect["width"] == 100.0
-    assert rect["height"] == 50.0
+    assert rect["width"] == 90.0
+    assert rect["height"] == 30.0
 
 
 def test_calculate_center():

@@ -5,12 +5,14 @@
 运行前请执行: playwright install chromium
 """
 
+import os
 import pytest
+import pytest_asyncio
 import asyncio
 from playwright.async_api import async_playwright
 
 
-# 检查是否安装了 Playwright
+# 检查是否安装了 Playwright SDK + chromium 浏览器
 try:
     from pymidscene.web_integration.playwright import WebPage
     PLAYWRIGHT_AVAILABLE = True
@@ -18,7 +20,35 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 
-@pytest.fixture
+def _chromium_browser_installed() -> bool:
+    """Chromium 需要 `playwright install chromium` 后才可用."""
+    try:
+        from playwright._impl._driver import compute_driver_executable  # type: ignore
+        import pathlib
+        # Playwright 缓存目录里有 chrome-* 子目录即算安装
+        cache = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local", "ms-playwright"
+        )
+        p = pathlib.Path(cache)
+        return p.exists() and any(p.glob("chromium*"))
+    except Exception:
+        return False
+
+
+CHROMIUM_INSTALLED = _chromium_browser_installed()
+SKIP_REASON = (
+    "Chromium browser not installed — run `playwright install chromium`"
+    if not CHROMIUM_INSTALLED
+    else ""
+)
+
+pytestmark = pytest.mark.skipif(
+    not (PLAYWRIGHT_AVAILABLE and CHROMIUM_INSTALLED),
+    reason=SKIP_REASON or "Playwright not available",
+)
+
+
+@pytest_asyncio.fixture  # strict asyncio_mode requires pytest_asyncio.fixture for async generators
 async def browser_context():
     """创建 Playwright 浏览器上下文"""
     if not PLAYWRIGHT_AVAILABLE:

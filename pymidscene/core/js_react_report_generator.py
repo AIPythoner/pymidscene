@@ -124,14 +124,22 @@ class ExecutionTask:
     
     # UI 上下文 - 动画播放需要 size 信息
     uiContext: Optional[Dict[str, Any]] = None
-    
+
     # 时间和资源
     timing: Optional[TaskTiming] = None
     usage: Optional[AIUsage] = None
-    
+
     # 定位结果
     matchedElement: Optional[List[MatchedElement]] = None
-    
+
+    # 缓存来源标记 (F2)
+    hitBy: Optional[Dict[str, Any]] = None
+
+    # 模型与原始响应 (F1)
+    modelName: Optional[str] = None
+    rawResponse: Optional[str] = None
+    markedScreenshot: Optional[str] = None  # bbox 标注后的截图
+
     # 错误信息
     error: Optional[str] = None
     errorStack: Optional[str] = None
@@ -165,13 +173,22 @@ class ExecutionTask:
             result["usage"] = self.usage.to_dict()
         if self.matchedElement:
             result["matchedElement"] = [e.to_dict() for e in self.matchedElement]
+        if self.hitBy:
+            result["hitBy"] = self.hitBy
+        if self.modelName:
+            result["modelName"] = self.modelName
+        if self.rawResponse:
+            result["rawResponse"] = self.rawResponse
+        if self.markedScreenshot:
+            # JS visualizer 期望的 key:与普通 recorder 截图并列存放
+            result["markedScreenshot"] = {"base64": self.markedScreenshot}
         if self.error:
             result["error"] = self.error
         if self.errorStack:
             result["errorStack"] = self.errorStack
         if self.errorMessage:
             result["errorMessage"] = self.errorMessage
-            
+
         return result
 
 
@@ -348,6 +365,15 @@ class JSReactReportGenerator:
         output: Optional[Any] = None,
         screenshot_width: Optional[int] = None,
         screenshot_height: Optional[int] = None,
+        # --- F1: 新增字段透传 ---
+        ai_model: Optional[str] = None,
+        ai_response: Optional[str] = None,
+        screenshot_marked: Optional[str] = None,
+        # --- F2: 缓存命中 ---
+        hit_by: Optional[Dict[str, Any]] = None,
+        # --- F4: 执行分组;同一 group_key 的任务合并到同一个 execution ---
+        group_key: Optional[str] = None,
+        group_name: Optional[str] = None,
     ):
         """
         添加执行任务
@@ -517,31 +543,48 @@ class JSReactReportGenerator:
             subType=sub_type,
             status=status,
             param=param if param else None,
-            thought=thought if thought else prompt,  # 如果没有 thought，使用 prompt 作为描述
-            output=task_output,  # 使用构建的 output（Locate 任务包含 element 信息）
+            thought=thought if thought else prompt,  # 没有 thought 时 fall back 到 prompt
+            output=task_output,
             recorder=recorder,
             uiContext=ui_context,
             matchedElement=matched_element,
             timing=timing,
             usage=usage,
-            error=error if error else None,  # 只在有错误时设置
-            errorMessage=error if error else None,  # 只在有错误时设置
+            hitBy=hit_by,  # F2
+            modelName=ai_model,  # F1
+            rawResponse=ai_response,  # F1
+            markedScreenshot=screenshot_marked,  # F1
+            error=error if error else None,
+            errorMessage=error if error else None,
         )
-        
+
         if self._current_dump is None:
             self.start_session()
         assert self._current_dump is not None
-        
-        # JS 版本每个操作是独立的 execution，这样整体播放功能才能正常工作
-        # 为每个 task 创建独立的 execution
-        execution_name = f"{sub_type or task_type} - {prompt or 'task'}"
-        new_execution = ExecutionDump(
-            name=execution_name,
-            description=None,
-            tasks=[task],
-            logTime=ts,
-        )
-        self._current_dump.executions.append(new_execution)
+
+        # F4: 如果本次 add_task 隶属一个 group,并且该 group 已有 execution,
+        # 则把 task 追加到现有 execution.tasks;否则新建 execution 并记录 group_key。
+        target_execution = None
+        if group_key:
+            for existing in self._current_dump.executions:
+                if getattr(existing, "_group_key", None) == group_key:
+                    target_execution = existing
+                    break
+
+        if target_execution is not None:
+            target_execution.tasks.append(task)
+        else:
+            execution_name = group_name or f"{sub_type or task_type} - {prompt or 'task'}"
+            new_execution = ExecutionDump(
+                name=execution_name,
+                description=None,
+                tasks=[task],
+                logTime=ts,
+            )
+            # 附加内部属性;JS 端不序列化此字段(to_dict 不含 _group_key)
+            if group_key:
+                object.__setattr__(new_execution, "_group_key", group_key)
+            self._current_dump.executions.append(new_execution)
     
     def generate_data_script(self) -> str:
         """

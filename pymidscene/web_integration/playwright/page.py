@@ -4,9 +4,10 @@ Playwright 页面适配器 - 对应 packages/web-integration/src/playwright/page
 将 Playwright Page 适配为 PyMidscene 的统一接口。
 """
 
-from typing import Optional, Any
+from typing import Optional, Any, List, Tuple
 import base64
 import asyncio
+import sys
 
 from playwright.async_api import Page as PlaywrightPage
 
@@ -39,10 +40,14 @@ class WebPage(AbstractInterface):
         """
         self.page = page
         self.wait_for_navigation_timeout = (
-            wait_for_navigation_timeout or self.DEFAULT_WAIT_FOR_NAVIGATION_TIMEOUT
+            wait_for_navigation_timeout
+            if wait_for_navigation_timeout is not None
+            else self.DEFAULT_WAIT_FOR_NAVIGATION_TIMEOUT
         )
         self.wait_for_network_idle_timeout = (
-            wait_for_network_idle_timeout or self.DEFAULT_WAIT_FOR_NETWORK_IDLE_TIMEOUT
+            wait_for_network_idle_timeout
+            if wait_for_network_idle_timeout is not None
+            else self.DEFAULT_WAIT_FOR_NETWORK_IDLE_TIMEOUT
         )
 
         logger.debug(
@@ -69,114 +74,105 @@ class WebPage(AbstractInterface):
         )
 
     async def get_size(self) -> Size:
-        """获取视口尺寸"""
-        viewport = self.page.viewport_size
-        if viewport is None:
-            # 如果没有设置 viewport，尝试获取窗口尺寸
-            size_info = await self.page.evaluate(
-                "() => ({ width: window.innerWidth, height: window.innerHeight })"
-            )
-            return {
-                "width": float(size_info["width"]),
-                "height": float(size_info["height"]),
-                "dpr": None
-            }
+        """
+        获取视口尺寸 (CSS 像素) 并附带真实 devicePixelRatio.
 
+        对应 JS base-page.ts:316-327,与 JS 保持同样的契约:
+        width/height 为 CSS 像素,dpr 用于还原图像像素 → CSS 的缩放关系.
+        HiDPI 屏幕下若 dpr 未返回,所有归一化-to-像素/像素 直通路径都会
+        产生系统性点击偏移,因此这里总是读取真实值.
+        """
+        size_info = await self.page.evaluate(
+            """
+            () => ({
+                width: window.innerWidth,
+                height: window.innerHeight,
+                dpr: window.devicePixelRatio || 1
+            })
+            """
+        )
         return {
-            "width": float(viewport["width"]),
-            "height": float(viewport["height"]),
-            "dpr": None
+            "width": float(size_info["width"]),
+            "height": float(size_info["height"]),
+            "dpr": float(size_info.get("dpr") or 1)
         }
 
     async def screenshot(self, full_page: bool = False) -> str:
         """
-        获取截图（Base64 编码）
+        获取截图(JPEG q=90 + raw base64,与 JS base-page.ts `screenshotBase64` 对齐).
+
+        历史:之前用 PNG 返回 —— 相同内容下 PNG 体积是 JPEG q=90 的 3-5 倍,
+        直接意味着 AI 请求的 image token 成本高 3-5 倍.JS 版本用 JPEG q=90 是
+        midscene 的既定选择,这里对齐.
+
+        返回格式:仍是**纯 base64**,不带 `data:image/jpeg;base64,` 前缀.调用方
+        (agent._build_messages 和 SessionRecorder)会在需要时自行加前缀,这样
+        既不破坏现有 call sites,又保持跨调用的数据紧凑.
 
         Args:
             full_page: 是否截取完整页面
 
         Returns:
-            Base64 编码的图像字符串
+            JPEG 图像的 Base64 字符串(无 data: 前缀)
         """
         logger.debug(f"Taking screenshot: full_page={full_page}")
 
-        # 截图
         screenshot_bytes = await self.page.screenshot(
-            type="png",
-            full_page=full_page
+            type="jpeg",
+            quality=90,
+            full_page=full_page,
         )
-
-        # 转换为 Base64
         screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
 
-        logger.debug(f"Screenshot taken: size={len(screenshot_base64)} chars")
-
+        logger.debug(f"Screenshot taken: size={len(screenshot_base64)} chars (jpeg)")
         return screenshot_base64
+
+    async def _ensure_in_viewport(self, x: float, y: float) -> Tuple[float, float]:
+        """
+        如果 (x, y) 已在视口内则直接返回;否则做一次粗滚动把 y 居中,
+        然后返回调整后的 (x, y_in_viewport).
+
+        **不做 `elementFromPoint` → `getBoundingClientRect` 的"重取中心"**:
+        agent 层已经通过 XPath 预先 `scrollIntoView({block:'center'})` 并
+        刷新过 element.center;在这里再根据 `elementFromPoint` 重新定位
+        可能命中覆盖的 wrapper/overlay,偏离 AI 实际看到的像素点.
+        """
+        adjusted = await self.page.evaluate(
+            """
+            (coords) => {
+                const { x, y } = coords;
+                const inViewport = (
+                    x >= 0 && x <= window.innerWidth &&
+                    y >= 0 && y <= window.innerHeight
+                );
+                if (inViewport) {
+                    return { x, y, scrolled: false };
+                }
+                // 元素完全在视口外 —— 粗滚动把 y 居中再点
+                window.scrollTo({
+                    top: Math.max(0, y - window.innerHeight / 2),
+                    behavior: 'instant'
+                });
+                return { x, y: y - window.scrollY, scrolled: true };
+            }
+            """,
+            {"x": x, "y": y},
+        )
+        if adjusted and adjusted.get("scrolled"):
+            await asyncio.sleep(0.15)
+        return (adjusted["x"], adjusted["y"]) if adjusted else (x, y)
 
     async def click(self, x: float, y: float) -> None:
         """
-        点击指定坐标
-        
-        点击前将元素滚动到视口中心，并重新计算滚动后的视口坐标
+        点击指定坐标.
 
         Args:
-            x: X 坐标
-            y: Y 坐标
+            x: X 坐标 (CSS 像素,相对文档左上角)
+            y: Y 坐标 (CSS 像素,相对文档左上角)
         """
         logger.debug(f"Clicking at ({x}, {y})")
 
-        # 将元素滚动到视口中心，并返回滚动后的新视口坐标
-        new_coords = await self.page.evaluate("""
-            (coords) => {
-                const { x, y } = coords;
-                
-                // 尝试获取元素
-                let element = document.elementFromPoint(x, y);
-                
-                // 如果元素不在当前视口内
-                if (!element) {
-                    // 先粗略滚动到坐标附近
-                    window.scrollTo({
-                        top: Math.max(0, y - window.innerHeight / 2),
-                        behavior: 'instant'
-                    });
-                    // 重新获取元素
-                    const newY = y - window.scrollY;
-                    element = document.elementFromPoint(x, newY);
-                }
-                
-                if (!element) {
-                    return null;
-                }
-                
-                // 滚动到视口中心
-                element.scrollIntoView({ 
-                    behavior: 'instant',
-                    block: 'center'
-                });
-                
-                // 🔑 关键：返回滚动后元素在视口中的新坐标
-                const rect = element.getBoundingClientRect();
-                return {
-                    x: rect.left + rect.width / 2,
-                    y: rect.top + rect.height / 2
-                };
-            }
-        """, {"x": x, "y": y})
-        
-        if new_coords:
-            # 等待滚动完成
-            await asyncio.sleep(0.15)
-            # 使用滚动后的新坐标点击
-            click_x = new_coords['x']
-            click_y = new_coords['y']
-            logger.debug(f"Scrolled: ({x}, {y}) -> ({click_x}, {click_y})")
-        else:
-            # 找不到元素，用原始坐标兜底
-            click_x = x
-            click_y = y
-            logger.warning(f"Element not found at ({x}, {y}), clicking original coords")
-
+        click_x, click_y = await self._ensure_in_viewport(x, y)
         await self.page.mouse.click(click_x, click_y)
 
         # 等待可能的导航
@@ -202,127 +198,85 @@ class WebPage(AbstractInterface):
         """
         logger.debug(f"Inputting text: '{text}' at ({x}, {y}), clear_first={clear_first}")
 
-        # 如果提供了坐标，先滚动并点击
+        # 如果提供了坐标,聚焦到该点(agent 层已经 scrollIntoView,这里只做视口兜底)
         if x is not None and y is not None:
-            # 滚动元素到视口中心，并返回滚动后的新视口坐标
-            new_coords = await self.page.evaluate("""
-                (coords) => {
-                    const { x, y } = coords;
-                    let element = document.elementFromPoint(x, y);
-                    
-                    if (!element) {
-                        window.scrollTo({
-                            top: Math.max(0, y - window.innerHeight / 2),
-                            behavior: 'instant'
-                        });
-                        const newY = y - window.scrollY;
-                        element = document.elementFromPoint(x, newY);
-                    }
-                    
-                    if (!element) {
-                        return null;
-                    }
-                    
-                    // 滚动到视口中心
-                    element.scrollIntoView({ 
-                        behavior: 'instant', 
-                        block: 'center' 
-                    });
-                    
-                    // 返回滚动后的新坐标
-                    const rect = element.getBoundingClientRect();
-                    return {
-                        x: rect.left + rect.width / 2,
-                        y: rect.top + rect.height / 2
-                    };
-                }
-            """, {"x": x, "y": y})
-            
-            if new_coords:
-                await asyncio.sleep(0.15)
-                click_x = new_coords['x']
-                click_y = new_coords['y']
-                logger.debug(f"Scrolled for input: ({x}, {y}) -> ({click_x}, {click_y})")
-            else:
-                click_x = x
-                click_y = y
-            
-            # 点击元素（使用滚动后的新坐标）
+            click_x, click_y = await self._ensure_in_viewport(x, y)
             await self.page.mouse.click(click_x, click_y)
             await asyncio.sleep(0.1)
 
-        # 清空输入框内容（与 JS 版本一致）
+        # 清空输入框内容(跨平台: mac 使用 Meta+A,其他平台 Ctrl+A —— 与 JS base-page.ts:481-504 对齐)
         if clear_first:
-            # 方法1: 全选后删除 (跨平台兼容)
-            # 使用 Ctrl+A (Windows/Linux) 或 Meta+A (macOS) 全选
+            is_mac = sys.platform == "darwin"
+            select_all_chord = "Meta+a" if is_mac else "Control+a"
             try:
-                # 尝试使用 Playwright 的 fill 方法定位到当前焦点元素
-                # 先全选现有内容
-                await self.page.keyboard.press("Control+a")
+                await self.page.keyboard.press(select_all_chord)
                 await asyncio.sleep(0.05)
-                # 删除选中内容
                 await self.page.keyboard.press("Backspace")
                 await asyncio.sleep(0.05)
             except Exception as e:
-                logger.debug(f"Clear with Ctrl+A failed, trying alternative: {e}")
-                # 备用方法：多次退格清除
-                # 先移动到末尾，然后逐个删除
+                logger.debug(f"Clear with {select_all_chord} failed, falling back: {e}")
+                # 备用方法: 多次退格清除
                 await self.page.keyboard.press("End")
-                for _ in range(100):  # 最多清除100个字符
+                for _ in range(100):
                     await self.page.keyboard.press("Backspace")
 
-        # 输入文本
-        await self.page.keyboard.type(text)
+        # 输入文本 —— delay=80ms 对齐 JS base-page.ts:447,避免受控输入框丢字
+        await self.page.keyboard.type(text, delay=80)
+
+    async def double_click(self, x: float, y: float) -> None:
+        """
+        双击坐标。对应 JS base-page.ts `leftDoubleClick`。
+        """
+        logger.debug(f"Double-clicking at ({x}, {y})")
+        cx, cy = await self._ensure_in_viewport(x, y)
+        await self.page.mouse.dblclick(cx, cy)
+        await self.wait_for_navigation()
+
+    async def right_click(self, x: float, y: float) -> None:
+        """
+        右键点击坐标。对应 JS base-page.ts `rightClick`。
+        """
+        logger.debug(f"Right-clicking at ({x}, {y})")
+        cx, cy = await self._ensure_in_viewport(x, y)
+        await self.page.mouse.click(cx, cy, button="right")
+
+    async def drag_and_drop(
+        self,
+        from_x: float,
+        from_y: float,
+        to_x: float,
+        to_y: float,
+    ) -> None:
+        """
+        拖放操作。对应 JS base-page.ts `dragAndDrop`。
+        Playwright 原生无单步 drag-and-drop API,用 mouse.move → down → move → up 组合。
+        """
+        logger.debug(f"Drag from ({from_x}, {from_y}) to ({to_x}, {to_y})")
+        fx, fy = await self._ensure_in_viewport(from_x, from_y)
+        tx, ty = await self._ensure_in_viewport(to_x, to_y)
+        await self.page.mouse.move(fx, fy)
+        await self.page.mouse.down()
+        # 分段 move 让浏览器 dispatch dragover 事件
+        steps = 10
+        for i in range(1, steps + 1):
+            ix = fx + (tx - fx) * (i / steps)
+            iy = fy + (ty - fy) * (i / steps)
+            await self.page.mouse.move(ix, iy)
+            await asyncio.sleep(0.02)
+        await self.page.mouse.up()
+        await self.wait_for_navigation()
 
     async def hover(self, x: float, y: float) -> None:
         """
-        悬停到指定坐标（带 scrollIntoView，与 JS 版本对齐）
+        悬停到指定坐标.
 
         Args:
-            x: X 坐标
-            y: Y 坐标
+            x: X 坐标 (CSS 像素)
+            y: Y 坐标 (CSS 像素)
         """
         logger.debug(f"Hovering at ({x}, {y})")
 
-        # 先将元素滚动到视口中心（与 click/input_text 一致）
-        new_coords = await self.page.evaluate("""
-            (coords) => {
-                const { x, y } = coords;
-                let element = document.elementFromPoint(x, y);
-                
-                if (!element) {
-                    window.scrollTo({
-                        top: Math.max(0, y - window.innerHeight / 2),
-                        behavior: 'instant'
-                    });
-                    const newY = y - window.scrollY;
-                    element = document.elementFromPoint(x, newY);
-                }
-                
-                if (!element) return null;
-                
-                element.scrollIntoView({ 
-                    behavior: 'instant',
-                    block: 'center'
-                });
-                
-                const rect = element.getBoundingClientRect();
-                return {
-                    x: rect.left + rect.width / 2,
-                    y: rect.top + rect.height / 2
-                };
-            }
-        """, {"x": x, "y": y})
-
-        if new_coords:
-            await asyncio.sleep(0.15)
-            hover_x = new_coords['x']
-            hover_y = new_coords['y']
-            logger.debug(f"Scrolled for hover: ({x}, {y}) -> ({hover_x}, {hover_y})")
-        else:
-            hover_x = x
-            hover_y = y
-
+        hover_x, hover_y = await self._ensure_in_viewport(x, y)
         await self.page.mouse.move(hover_x, hover_y)
 
     async def scroll(
@@ -407,7 +361,9 @@ class WebPage(AbstractInterface):
         Args:
             timeout: 超时时间（毫秒）
         """
-        timeout_ms = timeout or self.wait_for_navigation_timeout
+        timeout_ms = (
+            timeout if timeout is not None else self.wait_for_navigation_timeout
+        )
 
         if timeout_ms == 0:
             logger.debug("Navigation timeout is 0, skipping wait")
@@ -433,7 +389,9 @@ class WebPage(AbstractInterface):
         Args:
             timeout: 超时时间（毫秒）
         """
-        timeout_ms = timeout or self.wait_for_network_idle_timeout
+        timeout_ms = (
+            timeout if timeout is not None else self.wait_for_network_idle_timeout
+        )
 
         if timeout_ms == 0:
             logger.debug("Network idle timeout is 0, skipping wait")
@@ -541,6 +499,85 @@ class WebPage(AbstractInterface):
             logger.warning(f"No element found at ({x}, {y})")
 
         return xpath
+
+    async def get_element_xpaths(self, x: float, y: float) -> List[str]:
+        """
+        Return **multiple** XPath candidates for the element at ``(x, y)``.
+
+        M1: a single ``tag[n]`` path is brittle — one sibling insertion
+        shifts all indices and cache misses. We return several fallback
+        candidates in priority order so cache hits survive minor DOM drift:
+
+        1. ``//tag[@id='...']`` if the element has an id
+        2. ``//tag[@data-testid='...']`` / ``[@aria-label='...']`` etc.
+        3. ``//tag[normalize-space(text())='<text>']`` when the element has
+           short stable text
+        4. the full ``/html/body/.../tag[n]`` tag-indexed path (legacy fallback)
+
+        Mirrors (loosely) JS ``getXpathsByPoint`` from
+        ``@midscene/shared/extractor`` which also returns a ranked list.
+        """
+        logger.debug(f"Getting XPath candidates for element at ({x}, {y})")
+
+        xpaths: List[str] = await self.page.evaluate(
+            """
+            (coords) => {
+                const { x, y } = coords;
+                const el = document.elementFromPoint(x, y);
+                if (!el) return [];
+
+                const results = [];
+
+                const escAttr = (v) => String(v).replace(/'/g, "\\\\'");
+                const tag = el.nodeName.toLowerCase();
+
+                // 1. id
+                if (el.id && /^[A-Za-z][\\w\\-:.]*$/.test(el.id)) {
+                    results.push(`//${tag}[@id='${escAttr(el.id)}']`);
+                }
+                // 2. test/a11y attrs
+                for (const attr of ['data-testid','data-test-id','data-test','aria-label','name','role']) {
+                    const v = el.getAttribute(attr);
+                    if (v && v.length <= 80) {
+                        results.push(`//${tag}[@${attr}='${escAttr(v)}']`);
+                    }
+                }
+                // 3. short stable text
+                const text = (el.textContent || '').trim();
+                if (text && text.length <= 40 && /\\S/.test(text)) {
+                    const oneLine = text.replace(/\\s+/g, ' ');
+                    results.push(`//${tag}[normalize-space(text())='${escAttr(oneLine)}']`);
+                }
+
+                // 4. full tag[n] path (always include as last-ditch fallback)
+                const parts = [];
+                let cur = el;
+                while (cur && cur.nodeType === Node.ELEMENT_NODE) {
+                    let idx = 1;
+                    let sib = cur.previousElementSibling;
+                    while (sib) {
+                        if (sib.nodeName === cur.nodeName) idx++;
+                        sib = sib.previousElementSibling;
+                    }
+                    parts.unshift(`${cur.nodeName.toLowerCase()}[${idx}]`);
+                    cur = cur.parentElement;
+                }
+                results.push('/' + parts.join('/'));
+
+                // Dedup preserving order
+                const seen = new Set();
+                return results.filter(p => {
+                    if (seen.has(p)) return false;
+                    seen.add(p);
+                    return true;
+                });
+            }
+            """,
+            {"x": x, "y": y},
+        )
+        if xpaths:
+            logger.debug(f"XPath candidates ({len(xpaths)}): {xpaths[0][:80]}...")
+        return xpaths or []
 
     async def get_element_by_xpath(self, xpath: str) -> Optional[dict]:
         """

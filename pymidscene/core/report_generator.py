@@ -56,7 +56,9 @@ class ReportStep:
 
     # AI 信息 - 对应 JS 版本的 usage 和 taskInfo
     ai_model: Optional[str] = None
-    ai_tokens: Optional[int] = None
+    ai_tokens: Optional[int] = None  # total_tokens(汇总)
+    ai_prompt_tokens: Optional[int] = None  # 细分:对齐 JS usage.prompt_tokens
+    ai_completion_tokens: Optional[int] = None  # 细分:对齐 JS usage.completion_tokens
     ai_response: Optional[str] = None
     ai_reasoning: Optional[str] = None
     ai_raw_response: Optional[str] = None  # 原始响应
@@ -64,6 +66,10 @@ class ReportStep:
     # 缓存信息
     cache_hit: bool = False
     cache_type: Optional[str] = None  # 'plan', 'locate'
+    hit_by: Optional[Dict[str, Any]] = None  # JS hitBy:{from:"cache", xpath?, prompt?}
+
+    # 执行分组(F4:subtask 树);None 表示独立步骤
+    group_id: Optional[str] = None
 
     # 错误信息
     error_message: Optional[str] = None

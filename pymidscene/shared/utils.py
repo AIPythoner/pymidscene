@@ -18,8 +18,14 @@ DEFAULT_BBOX_SIZE = 20
 
 
 def calculate_hash(text: str) -> str:
-    """计算字符串的 MD5 哈希值"""
-    return hashlib.md5(text.encode('utf-8')).hexdigest()
+    """
+    Compute SHA-256 hex digest of a string.
+
+    Migrated from MD5 to SHA-256 to match JS ``generateHashId`` so cross-language
+    cache-key hashes are byte-identical. Call sites that previously truncated
+    the MD5 hex (32 chars) to 8 still work — SHA-256 hex is 64 chars.
+    """
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
 def safe_parse_json(text: str) -> Optional[Dict[str, Any]]:
@@ -85,23 +91,23 @@ def normalize_json_object(obj: Any) -> Any:
     return obj
 
 
+_DOUBAO_BBOX_NUM_PAIR_RE = re.compile(r"(?<=\d)\s+(?=\d)")
+
+
 def preprocess_doubao_bbox_json(input_str: str) -> str:
     """
-    预处理豆包 bbox JSON 格式
-    
-    豆包可能返回空格分隔的 bbox 值："940 445 969 490"
-    需要转换为逗号分隔："940,445,969,490"
-    
-    对应 JS 版本: preprocessDoubaoBboxJson (service-caller/index.ts:526-534)
+    将 ``bbox`` 值里的"空格分隔"重写为"逗号分隔".
+
+    输入例:``"940 445 969 490"`` → ``"940,445,969,490"``
+    (对齐 JS `preprocessDoubaoBboxJson`, service-caller/index.ts:526-534)
+
+    Implementation note: JS 原版用 `while (regex.test(...)) s = s.replace(...)`
+    对每轮完整扫描字符串,O(n²).这里用 lookahead/lookbehind 做一次 `re.sub`
+    就处理掉所有连续数字间隔,O(n).
     """
     if 'bbox' not in input_str:
         return input_str
-
-    # 将 bbox 值中的空格替换为逗号
-    while re.search(r'\d+\s+\d+', input_str):
-        input_str = re.sub(r'(\d+)\s+(\d+)', r'\1,\2', input_str)
-
-    return input_str
+    return _DOUBAO_BBOX_NUM_PAIR_RE.sub(",", input_str)
 
 
 def is_ui_tars(model_family: Optional[str]) -> bool:
@@ -151,6 +157,36 @@ def resize_image_base64(
     # 转换回 Base64
     buffer = BytesIO()
     image.save(buffer, format=image.format or 'PNG')
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+
+def resize_image_base64_to_size(
+    base64_str: str,
+    target_width: int,
+    target_height: int,
+) -> str:
+    """
+    将 Base64 图像精确缩放到目标尺寸.
+
+    对应 JS resizeImgBase64(base64, { width, height }) —— 用于将 HiDPI 屏幕
+    的原始截图 (viewport × dpr 像素) 压回到 CSS 尺寸后再发给 AI,使 AI 返回
+    的坐标与 Playwright 点击坐标系 (CSS 像素) 对齐.
+    """
+    image_data = base64.b64decode(base64_str)
+    image = Image.open(BytesIO(image_data))
+
+    original_format = image.format or 'PNG'
+    target_width = int(target_width)
+    target_height = int(target_height)
+    if image.size == (target_width, target_height):
+        return base64_str
+
+    resized = image.resize(
+        (target_width, target_height),
+        Image.Resampling.LANCZOS
+    )
+    buffer = BytesIO()
+    resized.save(buffer, format=original_format)
     return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 
@@ -233,13 +269,17 @@ def adapt_doubao_bbox(
     Returns:
         转换后的 bbox (x1, y1, x2, y2)
     """
-    assert width > 0 and height > 0, "width and height must be greater than 0"
+    assert (
+        width > 0 and height > 0
+    ), "width and height must be greater than 0 in doubao mode"
     
     # 处理字符串格式："x1 y1 x2 y2"
     if isinstance(bbox, str):
         # 验证格式
         if not re.match(r'^(\d+)\s(\d+)\s(\d+)\s(\d+)$', bbox.strip()):
-            raise ValueError(f"Invalid bbox string format for doubao-vision: {bbox}")
+            raise ValueError(
+                f"invalid bbox data string for doubao-vision mode: {bbox}"
+            )
         
         parts = bbox.strip().split()
         if len(parts) == 4:
@@ -249,7 +289,9 @@ def adapt_doubao_bbox(
                 round(int(parts[2]) * width / 1000),
                 round(int(parts[3]) * height / 1000),
             )
-        raise ValueError(f"Invalid bbox string format for doubao-vision: {bbox}")
+        raise ValueError(
+            f"invalid bbox data string for doubao-vision mode: {bbox}"
+        )
     
     # 处理数组格式
     bbox_list: List[float] = []
@@ -302,7 +344,7 @@ def adapt_doubao_bbox(
             round(bbox_list[5] * height / 1000),
         )
     
-    raise ValueError(f"Invalid bbox format: {bbox}")
+    raise ValueError(f"invalid bbox data for doubao-vision mode: {bbox}")
 
 
 def adapt_qwen2_5_bbox(bbox: List) -> Tuple[int, int, int, int]:
@@ -615,6 +657,7 @@ __all__ = [
     "preprocess_doubao_bbox_json",
     "is_ui_tars",
     "resize_image_base64",
+    "resize_image_base64_to_size",
     "get_screenshot_scale",
     "point_to_bbox",
     "normalize_bbox_input",

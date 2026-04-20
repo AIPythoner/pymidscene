@@ -285,6 +285,11 @@ class SessionRecorder:
             status="pending",
         )
 
+        # F4: tag with active group so report nests this step under the parent
+        group_id = self._current_group_id() if hasattr(self, "_group_stack") else None
+        if group_id:
+            step.group_id = group_id
+
         self.steps.append(step)
         self.current_step = step
         self._step_start_time = time.time()
@@ -340,9 +345,11 @@ class SessionRecorder:
         model: Optional[str] = None,
         tokens: Optional[int] = None,
         response: Optional[str] = None,
-        reasoning: Optional[str] = None
+        reasoning: Optional[str] = None,
+        prompt_tokens: Optional[int] = None,
+        completion_tokens: Optional[int] = None,
     ):
-        """记录 AI 调用信息"""
+        """记录 AI 调用信息(含 token 细分)"""
         if not self.current_step:
             return
 
@@ -350,10 +357,76 @@ class SessionRecorder:
             self.current_step.ai_model = model
         if tokens:
             self.current_step.ai_tokens = tokens
+        if prompt_tokens is not None:
+            self.current_step.ai_prompt_tokens = prompt_tokens
+        if completion_tokens is not None:
+            self.current_step.ai_completion_tokens = completion_tokens
         if response:
             self.current_step.ai_response = response
         if reasoning:
             self.current_step.ai_reasoning = reasoning
+
+    def record_cache_hit(
+        self,
+        cache_type: str,
+        xpath: Optional[str] = None,
+        prompt: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        标记当前步骤来源于 cache 命中(F2).
+
+        对齐 JS `ExecutionTask.hitBy = { from: 'cache', ... }`,让报告前端能把
+        这一步渲染为灰色/带 "cached" 徽标的节点,而不是"正常执行"。
+        """
+        if not self.current_step:
+            return
+        self.current_step.cache_hit = True
+        self.current_step.cache_type = cache_type
+        hit: Dict[str, Any] = {"from": "cache", "cache_type": cache_type}
+        if xpath:
+            hit["xpath"] = xpath
+        if prompt:
+            hit["prompt"] = prompt
+        if extra:
+            hit.update(extra)
+        self.current_step.hit_by = hit
+
+    # ---- F4: subtask grouping ----------------------------------------
+    # When the agent opens a group (e.g. ai_act wraps its planner loop),
+    # subsequent start_step() calls tag steps with the group's id so the
+    # report generator can nest them under one execution.
+
+    def start_group(self, name: str) -> str:
+        """
+        Open a step group — return its id. Every subsequent `start_step` will
+        attach `group_id = <this id>` until `end_group(id)` is called.
+        """
+        if not hasattr(self, "_group_stack"):
+            self._group_stack = []
+            self._group_meta: Dict[str, Dict[str, Any]] = {}
+        group_id = uuid.uuid4().hex[:10]
+        self._group_stack.append(group_id)
+        self._group_meta[group_id] = {"name": name, "start_ts": time.time()}
+        logger.debug(f"开始分组 group={group_id} name={name}")
+        return group_id
+
+    def end_group(self, group_id: str) -> None:
+        """Close the most-recently-opened group (LIFO)."""
+        if not hasattr(self, "_group_stack") or not self._group_stack:
+            return
+        if self._group_stack[-1] != group_id:
+            logger.warning(
+                f"end_group id mismatch (stack top={self._group_stack[-1]}, "
+                f"got={group_id}); closing top anyway"
+            )
+        self._group_stack.pop()
+        logger.debug(f"结束分组 group={group_id}")
+
+    def _current_group_id(self) -> Optional[str]:
+        if getattr(self, "_group_stack", None):
+            return self._group_stack[-1]
+        return None
 
     def complete_step(
         self,
@@ -476,7 +549,15 @@ class SessionRecorder:
             if step.element_center:
                 element_center = step.element_center
             
-            # 添加任务
+            # F4: 查找步骤所属 group 的友好名(若 SessionRecorder.start_group 记过)
+            group_key = step.group_id
+            group_name = None
+            if group_key:
+                meta = getattr(self, "_group_meta", {}).get(group_key)
+                if meta:
+                    group_name = meta.get("name")
+
+            # 添加任务 —— 全字段透传(F1+F2+F4)
             self.js_react_generator.add_task(
                 task_type=task_type,
                 sub_type=sub_type,
@@ -489,6 +570,14 @@ class SessionRecorder:
                 element_text=step.element_description,
                 duration_ms=step.duration_ms,
                 ai_tokens=step.ai_tokens,
+                ai_prompt_tokens=step.ai_prompt_tokens,  # F1
+                ai_completion_tokens=step.ai_completion_tokens,  # F1
+                ai_model=step.ai_model,  # F1
+                ai_response=step.ai_response,  # F1
+                screenshot_marked=step.screenshot_marked,  # F1
+                hit_by=step.hit_by,  # F2
+                group_key=group_key,  # F4
+                group_name=group_name,  # F4
                 error=step.error_message,
                 thought=step.ai_reasoning,
             )

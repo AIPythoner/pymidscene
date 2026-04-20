@@ -4,9 +4,41 @@
 提供对阿里云千问视觉语言模型的支持。
 """
 
-from typing import Dict, Any, List, Optional
+import os
+from typing import Dict, Any, List, Optional, cast
+
+from openai.types.chat import ChatCompletionMessageParam
+
 from .base import BaseAIModel
 from ..service_caller import ModelConfig, call_ai
+
+
+def _resolve_qwen_model_family(
+    model_name: str,
+    explicit_family: Optional[str] = None,
+) -> str:
+    """
+    Resolve Qwen model family (qwen2.5-vl vs qwen3-vl).
+
+    Coord systems differ: qwen2.5-vl returns absolute pixel coords,
+    qwen3-vl returns 0-1000 normalized coords (default branch of adapt_bbox).
+    Routing a qwen3-vl response through the qwen2.5-vl pixel adapter
+    would miscalibrate every click by a factor of width/1000.
+
+    Resolution precedence (mirrors JS):
+    1. Explicit family argument
+    2. MIDSCENE_USE_QWEN3_VL env flag
+    3. Model name contains "qwen3"
+    4. Fallback to qwen2.5-vl
+    """
+    if explicit_family in ("qwen2.5-vl", "qwen3-vl"):
+        return explicit_family
+    if os.getenv("MIDSCENE_USE_QWEN3_VL"):
+        return "qwen3-vl"
+    name_lower = (model_name or "").lower()
+    if "qwen3" in name_lower or name_lower.startswith("qwen-vl-3"):
+        return "qwen3-vl"
+    return "qwen2.5-vl"
 
 
 class QwenVLModel(BaseAIModel):
@@ -19,6 +51,8 @@ class QwenVLModel(BaseAIModel):
         "qwen-vl-plus",
         "qwen2-vl-7b-instruct",
         "qwen2-vl-72b-instruct",
+        "qwen3-vl-plus",
+        "qwen3-vl-max",
     ]
 
     def __init__(
@@ -28,6 +62,7 @@ class QwenVLModel(BaseAIModel):
         base_url: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        model_family: Optional[str] = None,
         **kwargs
     ):
         """
@@ -54,13 +89,12 @@ class QwenVLModel(BaseAIModel):
 
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.model_family = _resolve_qwen_model_family(model_name, model_family)
 
-        # 验证模型名称
+        # 验证模型名称（仅白名单警告，不再硬失败以允许 qwen3-vl-* 新模型）
         if model_name not in self.SUPPORTED_MODELS:
-            raise ValueError(
-                f"Unsupported model: {model_name}. "
-                f"Supported models: {', '.join(self.SUPPORTED_MODELS)}"
-            )
+            # 非致命：模型家族已通过名称/env 推断，允许通过
+            pass
 
     def validate_config(self) -> bool:
         """验证配置是否有效"""
@@ -102,12 +136,13 @@ class QwenVLModel(BaseAIModel):
             retry_interval=kwargs.get("retry_interval", 2000),
             http_proxy=kwargs.get("http_proxy"),
             model_description=f"Qwen VL {self.model_name}",
+            model_family=self.model_family,
             intent=kwargs.get("intent"),
         )
 
         # 调用 AI
         result = call_ai(
-            messages=messages,
+            messages=cast(List[ChatCompletionMessageParam], messages),
             model_config=model_config,
             stream=kwargs.get("stream", False),
             on_chunk=kwargs.get("on_chunk"),
