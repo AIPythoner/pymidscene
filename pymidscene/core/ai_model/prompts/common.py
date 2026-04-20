@@ -4,10 +4,13 @@ Prompt 通用工具 - 对应 packages/core/src/ai-model/prompt/common.ts
 提供 Prompt 生成的通用函数。
 """
 
-from typing import Optional, Literal
+from __future__ import annotations
 
+import os
+from datetime import datetime
+from typing import Literal
 
-ModelFamily = Optional[Literal[
+ModelFamily = Literal[
     "qwen2.5-vl",
     "qwen3-vl",
     "gemini",
@@ -18,13 +21,13 @@ ModelFamily = Optional[Literal[
     "glm-v",
     "auto-glm",
     "auto-glm-multilingual",
-]]
+] | None
 
 
 def bbox_description(model_family: ModelFamily = None) -> str:
     """
     根据模型类型返回 bbox 的描述
-    
+
     对应 JS 版本: bboxDescription (prompt/common.ts:2-7)
 
     不同模型使用不同的坐标系统：
@@ -44,15 +47,33 @@ def bbox_description(model_family: ModelFamily = None) -> str:
     return "2d bounding box as [xmin, ymin, xmax, ymax]"
 
 
+def _local_timezone_name() -> str | None:
+    """Return the best available local timezone identifier."""
+    tzinfo = datetime.now().astimezone().tzinfo
+    if tzinfo is None:
+        return None
+
+    return (
+        getattr(tzinfo, "key", None)
+        or getattr(tzinfo, "zone", None)
+        or str(tzinfo)
+    )
+
+
 def get_preferred_language() -> str:
     """
     获取首选语言
 
     Returns:
-        首选语言（默认为中文）
+        首选语言（环境变量优先，否则按时区推断）
     """
-    import os
-    return os.getenv("MIDSCENE_PREFERRED_LANGUAGE", "Chinese")
+    preferred_language = os.getenv("MIDSCENE_PREFERRED_LANGUAGE")
+    if preferred_language:
+        return preferred_language
+
+    timezone_name = _local_timezone_name()
+    is_china = timezone_name in {"Asia/Shanghai", "China Standard Time"}
+    return "Chinese" if is_china else "English"
 
 
 __all__ = ["bbox_description", "get_preferred_language", "ModelFamily"]

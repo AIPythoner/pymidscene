@@ -4,8 +4,11 @@
 提供用于 AI 数据提取的 Prompt 模板。
 """
 
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
+
 import json
+from typing import Any
+
 from .common import get_preferred_language
 
 
@@ -49,34 +52,68 @@ By viewing the screenshot and page contents, you can extract the following data:
 <thought>According to the screenshot, i can see ...</thought>
 <data-json>
 {{
-  "name": "John Doe",
+  "name": "John",
   "age": 30,
   "isAdmin": true
 }}
 </data-json>
-<errors>[]</errors>
 
 # Example 2
-If some data is not found in the screenshot, you should return:
+If the DATA_DEMAND is:
 
-<thought>I can see the name and age, but cannot determine if the user is admin...</thought>
+<DATA_DEMAND>
+the todo items list, string[]
+</DATA_DEMAND>
+
+By viewing the screenshot and page contents, you can extract the following data:
+
+<thought>According to the screenshot, i can see ...</thought>
 <data-json>
-{{
-  "name": "John Doe",
-  "age": 30,
-  "isAdmin": null
-}}
+["todo 1", "todo 2", "todo 3"]
 </data-json>
-<errors>["Cannot determine if user is admin from the screenshot"]</errors>
+
+# Example 3
+If the DATA_DEMAND is:
+
+<DATA_DEMAND>
+the page title, string
+</DATA_DEMAND>
+
+By viewing the screenshot and page contents, you can extract the following data:
+
+<thought>According to the screenshot, i can see ...</thought>
+<data-json>
+"todo list"
+</data-json>
+
+# Example 4
+If the DATA_DEMAND is:
+
+<DATA_DEMAND>
+{{
+  "result": "Boolean, is it currently the SMS page?"
+}}
+</DATA_DEMAND>
+
+By viewing the screenshot and page contents, you can extract the following data:
+
+<thought>According to the screenshot, i can see ...</thought>
+<data-json>
+{{ "result": true }}
+</data-json>
 """
 
 
-def extract_data_prompt(data_demand: Dict[str, str] | str) -> str:
+def extract_data_prompt(
+    data_demand: dict[str, str] | str,
+    page_description: str | None = None,
+) -> str:
     """
     生成数据提取的用户 Prompt
 
     Args:
         data_demand: 数据需求（字典或字符串）
+        page_description: 可选的页面内容描述，对齐 JS Prompt 结构
 
     Returns:
         用户 Prompt 字符串
@@ -86,16 +123,17 @@ def extract_data_prompt(data_demand: Dict[str, str] | str) -> str:
     else:
         demand_str = data_demand
 
-    return f"""
-<DATA_DEMAND>
-{demand_str}
-</DATA_DEMAND>
+    prompt_parts = []
+    if page_description:
+        prompt_parts.append(
+            f"<PageDescription>\n{page_description}\n</PageDescription>"
+        )
 
-Please extract the data according to the requirements above.
-"""
+    prompt_parts.append(f"<DATA_DEMAND>\n{demand_str}\n</DATA_DEMAND>")
+    return "\n\n".join(prompt_parts)
 
 
-def parse_xml_extraction_response(xml_string: str) -> Dict[str, Any]:
+def parse_xml_extraction_response(xml_string: str) -> dict[str, Any]:
     """
     解析 XML 格式的提取响应
 
@@ -107,10 +145,10 @@ def parse_xml_extraction_response(xml_string: str) -> Dict[str, Any]:
     """
     import re
 
-    def extract_xml_tag(xml: str, tag: str) -> Optional[str]:
+    def extract_xml_tag(xml: str, tag: str) -> str | None:
         """提取 XML 标签内容"""
         pattern = f"<{tag}>(.*?)</{tag}>"
-        match = re.search(pattern, xml, re.DOTALL)
+        match = re.search(pattern, xml, re.DOTALL | re.IGNORECASE)
         return match.group(1).strip() if match else None
 
     thought = extract_xml_tag(xml_string, "thought")
@@ -124,10 +162,10 @@ def parse_xml_extraction_response(xml_string: str) -> Dict[str, Any]:
     try:
         data = json.loads(data_json_str)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse data-json: {e}")
+        raise ValueError(f"Failed to parse data-json: {e}") from e
 
     # 解析 errors（可选）
-    errors: Optional[List[str]] = None
+    errors: list[str] | None = None
     if errors_str:
         try:
             parsed_errors = json.loads(errors_str)
