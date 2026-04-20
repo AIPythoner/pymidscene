@@ -1,5 +1,105 @@
 # PyMidscene 更新日志
 
+## [0.2.0] - 2026-04-17
+
+### 概述
+
+对照 `midscene-main/` 做了一次完整的行级代码审查(`docs/CODE_REVIEW_2026-04-17.md`),本版本落地审查中发现的 22 项问题,覆盖核心正确性、模型家族完整支持、可视化报告完整度,以及测试骨架修复。详细分波记录见 `docs/FIX_PROGRESS_2026-04-17.md`。
+
+### ⚠️ 破坏性变更(Breaking)
+
+1. **`ai_wait_for` 签名变更**
+   - 旧: `ai_wait_for(assertion, timeout=30, interval=2)`(秒)
+   - 新: `ai_wait_for(assertion, timeout_ms=15000, check_interval_ms=3000)`(毫秒,与 JS `aiWaitFor` 对齐)
+   - 兼容:旧 `timeout=` / `interval=`(秒)作为 kwarg 仍可用,但默认值更短
+   - 异常处理收紧:只有**断言为假**才重试,**网络/模型错误直接透传**(之前会被吞成超时)
+
+2. **`ai_assert` 返回形态**
+   - 新增 `keep_raw_response=True`,此时不抛 `AssertionError`,返回 `{pass, thought, message}`(与 JS `opt.keepRawResponse` 对齐)
+   - 默认行为(`False`)保持不变,失败时仍抛 `AssertionError`
+
+3. **`ai_act` 空计划不再静默成功**
+   - 连续两次返回空 action 现在抛 `RuntimeError`(对齐 JS `TaskExecutionError`);之前会返回 `True`
+
+4. **截图 MIME 从 PNG 改为 JPEG**
+   - `WebPage.screenshot()` 现在返回 JPEG q=90 的 base64(与 JS `base-page.ts` 对齐)
+   - 请求体 `data:image/...;base64,` 前缀同步改为 `image/jpeg`
+   - 体积降 3-5×,AI image-token 成本相应下降
+
+5. **`calculate_hash` 输出长度变化**
+   - MD5(32 字符)→ SHA-256(64 字符),与 JS `generateHashId` 跨语言对齐
+
+6. **`MODEL_FAMILY_VALUES` 枚举修正**
+   - 移除不合法的 `"openai"`
+   - 新增 `"glm-v" / "auto-glm" / "auto-glm-multilingual" / "gpt-5"`,与 JS `types.ts:289` 对齐
+
+### 重大变更(Non-breaking)
+
+#### 视觉模型家族全量支持
+- **UI-TARS**(`vlm-ui-tars / -doubao / -doubao-1.5`):新增完整解析器 `core/ai_model/ui_tars_planning.py` + 专用 prompt,支持 `Thought:/Action:` 文本语法与 `<bbox>x1 y1 x2 y2</bbox>` → 中心点转换,`[EOS]` 清洗,`Reflection:` 段剥离,9 种动作(click/left_double/right_single/drag/type/hotkey/scroll/wait/finished)
+- **auto-glm / auto-glm-multilingual**:新增独立子包 `core/ai_model/auto_glm/`,含 prompt(中英双版本)、parser(`<think>/<answer>` XML)、actions(0-999 归一化 → CSS 像素,Swipe→Scroll 轴分类)、planning 入口
+- **Claude 原生 Anthropic 协议**:新增 `_call_with_anthropic_sdk`,OpenAI messages 自动转 Anthropic content blocks,system role 提升到顶层字段;`anthropic` 为 optional 依赖
+- **qwen3-vl**:修复坐标家族路由,不再被当作 qwen2.5-vl 处理(之前点击坐标错乱)
+- **deepThink 参数体系**:按家族映射到 `extra_body.config.enable_thinking`(qwen3-vl) / `extra_body.thinking.type`(doubao/glm-v) / `reasoning.effort`(gpt-5),支持 `MIDSCENE_FORCE_DEEP_THINK` 全局开关
+
+#### Agent 公开方法大幅扩展
+新增 9 个与 JS 对齐的 API:
+- `ai_tap` / `ai_hover` / `ai_right_click` / `ai_double_click` / `ai_keyboard_press`
+- `ai_boolean` / `ai_number` / `ai_string`(基于 `ai_query` 的类型化问答)
+- `ai_ask`(自由问答,返回原始字符串)
+
+#### 可视化报告完整度
+- 新增字段透传:`screenshot_marked`(bbox 标注截图)、`ai_prompt_tokens / ai_completion_tokens`(token 细分)、`ai_model`(模型名)、`ai_response`(原始响应最多 2000 字符)
+- 新增 `hit_by` 标记 —— cache 命中的步骤在报告里可被渲染为 "cached" 徽标
+- 新增 `subtask 树` —— `ai_act / ai_click / ai_input` 下的 Planning / Locate / Tap 作为子任务挂在一个父 execution 下,报告左侧显示树结构而非平铺
+- `core/types.py:ExecutionDump._task_to_dict / from_dict` 字段补全,支持 `.web-dump.json` 与 JS visualizer round-trip
+
+#### HiDPI 屏幕坐标正确性(C4)
+- `WebPage.get_size()` 现在返回真实 `devicePixelRatio`
+- `Agent._capture_ai_screenshot()`:发给 AI 之前把截图压回 CSS 尺寸(对齐 JS `agent.ts:447-467` 的 `resizeImgBase64` 逻辑),消除 Retina / 200% 缩放下的系统性点击偏移
+
+#### Cache YAML 与 JS 互通
+- `midsceneVersion` 写入 `0.17.0`(满足 JS 最低支持线 `0.16.10`)
+- 文件名 hash 从 MD5 切 SHA-256 前 8 位(对齐 JS `generateHashId`)
+- 支持 `MIDSCENE_RUN_DIR` / `MIDSCENE_CACHE_MAX_FILENAME_LENGTH` 环境变量
+- 加载时自动迁移 JS 旧版顶层 `xpaths` 字段 → `cache.xpaths`
+- write-only 模式:flush 前先读回旧记录再 merge(对齐 JS `updateOrAppendCacheRecord`),不再覆盖丢失旧数据
+
+#### Playwright 动作层修正
+- macOS 上 `clearInput` 使用 `Meta+a` 而非 `Ctrl+a`(避免只删单字符的 bug)
+- `keyboard.type(delay=80)`,对齐 JS,避免受控输入框丢字
+- `click / hover / input_text` 去除"`elementFromPoint` → `scrollIntoView` → 重取中心"逻辑,保留纯视口兜底 —— agent 层已经预先 scrollIntoView,此处再做会命中覆盖层 wrapper 导致误点
+- 新增 `double_click / right_click / drag_and_drop` 方法
+- 新增 `get_element_xpaths()` 多候选(id / `data-testid` / 文本内容 / tag-index),提升 DOM 漂移后的 cache 命中率
+
+### 新增
+
+- 3 个新 prompt 模块:`describe.py`(元素描述,用于 cache 命名)、`section_locator.py`(大页面二段定位)、`order_sensitive_judge.py`(序数描述识别,含 `heuristic_is_order_sensitive` 本地启发)
+- `ai_locate` 对"第 3 行 / the third / 最后一个"等序数描述自动跳过缓存,防止 DOM 重排后错点
+- `service_caller`:SOCKS 代理支持(via `httpx-socks` optional dep);流式 `CodeGenerationChunk` 最终帧 `isComplete + usage`(provider 未给 usage 时按 `len(content)/4` 估算)
+- `_call_with_httpx` 新增传输层异常重试(`ConnectError / ReadTimeout / ReadError / RemoteProtocolError`)
+- `ai_input(mode=...)`:支持 `replace`(默认) / `clear` / `append` / `typeOnly`
+- `ai_query` 现在进入 SessionRecorder,前后截图与提取结果都能在报告里看到
+- 新增环境变量常量(不再静默忽略):`MIDSCENE_MODEL_MAX_TOKENS / OPENAI_MAX_TOKENS / MIDSCENE_RUN_DIR / MIDSCENE_REPORT_TAG_NAME / MIDSCENE_REPLANNING_CYCLE_LIMIT / MIDSCENE_CACHE / MIDSCENE_CACHE_MAX_FILENAME_LENGTH / MIDSCENE_FORCE_DEEP_THINK / MIDSCENE_LANGSMITH_DEBUG / MIDSCENE_LANGFUSE_DEBUG / MIDSCENE_PREFERRED_LANGUAGE / MIDSCENE_DEBUG_MODE`
+- AutoGLM 自动注入 `top_p=0.85 / frequency_penalty=0.2`(对齐 JS)
+
+### 修复
+
+- `ai_act` 把动作 append 到 `conversation_history` / 缓存的时机从"执行前"改为"执行成功后" —— 失败动作不再毒化下一轮 replan 上下文,也不会被固化到 cache.yaml
+- `ai_act` 缓存命中路径现在会把每个回放动作写进 session_recorder(对齐 JS `loadYamlFlowAsPlanning`),之前 cached 运行在报告里完全看不见
+- `preprocess_doubao_bbox_json` 正则从 O(n²) 改为单次 `re.sub`(lookahead/lookbehind)
+- `test_cache.py::test_write_only_mode`:实现端修复,flush 前 merge 磁盘旧记录
+
+### 文档
+
+- `docs/CODE_REVIEW_2026-04-17.md`:初始行级审查,列出 10 项 Critical + 15+ High
+- `docs/FIX_PROGRESS_2026-04-17.md`:完整 4 波修复记录,含模型家族矩阵、字段透传前后对比、per-item 文件引用
+
+### 可选依赖
+
+- `anthropic` — Claude 原生协议所需,通过 `pip install anthropic` 启用
+- `httpx-socks` — SOCKS 代理所需,通过 `pip install httpx-socks` 启用
+
 ## [0.1.5] - 2026-04-14
 
 ### 修复
