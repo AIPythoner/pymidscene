@@ -1,108 +1,117 @@
-# iOS Support (Placeholder)
+# pymidscene.ios
 
-本目录为 iOS 自动化支持预留。
+**iOS 自动化支持** — 通过 WebDriverAgent (WDA) 的 HTTP API 控制 iOS 设备 / 模拟器，复用 Web 端同一套 AI 驱动能力。
 
-## 当前状态
+## 安装
 
-🚧 **规划中** - iOS 支持将在 Android 支持完成后实现
+`pymidscene` 默认已包含 iOS 模块（只依赖 `httpx`, 它是基础依赖），无需额外安装。
 
-当前 PyMidscene 已完整实现:
-- ✅ Playwright 集成 (Web 平台)
-- ✅ Qwen VL 和 Doubao Vision 模型支持
-- ✅ 智能缓存系统
-- ✅ 执行记录和报告
+## 前置条件
 
-## 未来扩展计划
+本库**不负责启动 WebDriverAgent**。使用前需要自行在目标设备上启动 WDA，以下任选其一：
 
-PyMidscene 将支持 iOS 平台的 AI 自动化，通过 XCUITest 或 Appium 实现。
+| 场景 | 启动方式 |
+|---|---|
+| iOS 真机 (macOS) | Xcode 打开 WebDriverAgent.xcodeproj → Product → Test (WebDriverAgentRunner) |
+| iOS 真机 (跨平台) | `pip install tidevice` + `tidevice xctest -B com.facebook.WebDriverAgentRunner.xctrunner` |
+| iOS 模拟器 | Xcode Test 运行一次, 或 `xcodebuild test -project WebDriverAgent.xcodeproj ...` |
+| 远程设备 | 在远端启动 WDA, 然后 SSH port-forward 8100 到本地 |
 
-### 计划支持的功能
+验证 WDA 可达:
 
-- ✅ XCUITest 集成
-- ✅ Appium 支持
-- ✅ iOS UI 元素定位
-- ✅ 截图和坐标转换
-- ✅ 手势操作（点击、滑动、长按等）
-- ✅ 模拟器和真机支持
-
-### 技术方案
-
-**方案一：基于 XCUITest**
-- 使用 `xcrun simctl` 控制模拟器
-- 通过 WebDriverAgent 连接真机
-
-**方案二：基于 Appium**
-- 使用 `appium-python-client`
-- 统一的 iOS/Android 自动化接口
-
-### 使用示例（未来）
-
-```python
-from pymidscene import Agent
-from pymidscene.ios import IOSPage
-
-# 连接 iOS 设备
-ios_page = IOSPage(device_id="iPhone-14-Pro")
-
-# 创建 Agent（支持多种模型）
-agent = Agent(ios_page, model="qwen-vl-max")  # 或 "doubao-vision", "vlm-ui-tars-doubao-1.5"
-
-# 执行自动化
-agent.ai_act("打开设置应用")
-agent.ai_act("找到并点击通用设置")
+```bash
+curl http://localhost:8100/status
 ```
 
-## 实现指南
-
-如果您想贡献 iOS 支持，请参考以下资源：
-
-1. **参考实现**: `pymidscene/web_integration/playwright/`
-2. **抽象接口**: `pymidscene/web_integration/base.py` 中的 `AbstractInterface`
-3. **JS 版本**: [Midscene ios package](https://github.com/web-infra-dev/midscene/tree/main/packages/ios)
-4. **推荐库**: `appium-python-client` 或 `wda` (WebDriverAgent Python client)
-
-### 需要实现的核心方法
+## 快速上手
 
 ```python
-class IOSPage(AbstractInterface):
-    def screenshot(self) -> str:
-        """返回 Base64 编码的截图"""
-        pass
+import asyncio
+from pymidscene.ios import agent_from_webdriver_agent, check_ios_environment
 
-    def get_size(self) -> Size:
-        """获取屏幕尺寸"""
-        pass
+async def main():
+    env = await check_ios_environment()
+    assert env["available"], env["error"]
 
-    def click(self, x: float, y: float):
-        """点击指定坐标"""
-        pass
+    async with await agent_from_webdriver_agent() as agent:
+        await agent.launch("微信")          # 中文名 → com.tencent.xin
+        await agent.ai_tap("扫一扫")
+        await agent.ai_query({"text": "页面标题"})
+        await agent.home()
 
-    def swipe(self, start_x: float, start_y: float, end_x: float, end_y: float):
-        """滑动手势"""
-        pass
-
-    def long_press(self, x: float, y: float, duration: float):
-        """长按操作"""
-        pass
+asyncio.run(main())
 ```
 
-### 技术挑战
+## 已实现能力
 
-- 🔍 iOS UI 树解析（XCUITest accessibility tree）
-- 📱 设备连接（模拟器 vs 真机）
-- 🎯 坐标系转换（考虑 Retina 显示屏）
-- 🔐 代码签名和证书管理
-- ⚡ WebDriverAgent 部署和维护
+| 能力 | JS 对应 | Python 对应 |
+|---|---|---|
+| WDA HTTP 基础协议 | `@midscene/webdriver` | `pymidscene.webdriver.WebDriverClient` |
+| iOS WDA 客户端 | `ios-webdriver-client.ts` | `pymidscene.ios.IOSWebDriverClient` |
+| Session / Capabilities | `createSession` | `create_session` (默认注入 XCUITest) |
+| 截图 | `screenshotBase64` | `IOSDevice.screenshot` |
+| 窗口尺寸 / DPR | `size` + `/wda/screen` | `IOSDevice.get_size` |
+| 点击 / 双击 / 三连击 / 长按 | `tap / doubleTap / tripleTap / longPress` | `click / double_click / long_press` + WDA client |
+| 滑动 | W3C Actions `/actions` | `IOSDevice.swipe` (同 W3C) |
+| 滚动 | `scroll*` | `scroll / scroll_until_top/bottom/left/right` |
+| Drag & Drop | `swipe` | `drag_and_drop` |
+| 文本输入 (ASCII + Unicode) | `/wda/keys` | `IOSDevice.input_text` / `type_text` |
+| 单键 (Enter / 方向键 / Tab) | `pressKey` | `key_press` |
+| 清空当前输入 | `clearActiveElement` | `IOSDevice.clear_input` |
+| 关闭软键盘 | `dismissKeyboard` | `hide_keyboard` (含上滑 fallback) |
+| App 生命周期 | `launchApp / activateApp / terminateApp` | `launch / activate_app / terminate_app` |
+| 打开 URL (带 Safari 兜底) | `openUrl` | 内部实现已含 Safari fallback |
+| Home / App Switcher | `pressHomeButton / appSwitcher` | `home / app_switcher` |
+| 直通 WDA 请求 | `runWdaRequest` | `run_wda_request` |
+| App 名 → Bundle ID | 183 条映射 | `DEFAULT_APP_NAME_MAPPING` |
+| `evaluate_javascript` 兼容 | — | 识别 `scrollTo(0,0)` / `scrollHeight` / `history.back` 后本地化 |
 
-### 开发环境要求
+## 环境变量
 
-- macOS 系统（用于 XCUITest）
-- Xcode 和命令行工具
-- iOS 设备或模拟器
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MIDSCENE_WDA_HOST` | `localhost` | WDA host |
+| `MIDSCENE_WDA_PORT` | `8100` | WDA port |
+| `MIDSCENE_WDA_BASE_URL` | — | 直接指定完整 URL, 覆盖 host+port |
+| `MIDSCENE_WDA_TIMEOUT` | `30` | HTTP 请求超时 (秒) |
+
+## 架构
+
+```
+pymidscene/
+├── webdriver/client.py       # 通用 W3C WebDriver HTTP 客户端 (httpx)
+└── ios/
+    ├── webdriver_client.py   # iOS 专属 WDA 端点
+    ├── device.py             # IOSDevice(AbstractInterface)
+    ├── agent.py              # IOSAgent (组合 core Agent)
+    ├── app_name_mapping.py   # 183 条中文名 → bundle id
+    └── utils.py              # check_ios_environment / agent_from_webdriver_agent
+```
+
+JS 版的 `@midscene/webdriver` `WDAManager`(用 `xcodebuild` 启动 WDA 的那部分)在 Python 版**不提供** — 启动 WDA 本身超出 Python 端的职责范围, 不同用户用 tidevice / Xcode / 模拟器的方式各异, 强行打包会引入 macOS 限制。
+
+## 尚未移植
+
+- `WDAManager` (自动 `xcodebuild` 启 WDA)
+- iOS Playground 与 MCP server
+- Safari URL 兜底方案里的 UI 自动化细节 (目前只做了"重启 Safari → POST /url" 的简化版)
+
+## 与 Android 的选择
+
+| 场景 | 推荐 |
+|---|---|
+| 国内安卓机 (含鸿蒙兼容) | `pymidscene[android]` — ADB 直连 |
+| iOS 真机 / 模拟器 | `pymidscene.ios` — 需要 WDA |
+| 跨 iOS + Android 对同一动作 | 两者都初始化, 通过 AI 指令保持一致 |
+
+## 运行测试
+
+```bash
+pytest tests/ios/ -v
+```
+
+全部测试基于 `httpx.MockTransport` mock, 不需要真实 WDA 或 iOS 设备。
 
 ## 贡献
 
-欢迎提交 Pull Request！对于 iOS 支持，建议:
-1. 先在 Issue 中讨论技术方案
-2. 确保有 macOS 开发环境
-3. 提供模拟器和真机测试结果
+欢迎提 PR。WDA Manager 自动化启动、完整的 `clearActiveElement` 回退策略、或 iOS 15+ 的最新 WDA 端点兼容都是好方向。

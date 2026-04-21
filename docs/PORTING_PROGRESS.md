@@ -13,9 +13,9 @@
 | 缓存系统 | ✅ 完成 | XPath 缓存，与 JS 兼容 |
 | Playwright 集成 | ✅ 完成 | Web 自动化 |
 | 报告生成 | ✅ 完成 | HTML 可视化报告 |
+| Android | ✅ 完成 | `pymidscene.android` (adbutils + ADBKeyboard) |
+| iOS | ✅ 完成 | `pymidscene.ios` (WebDriverAgent HTTP) |
 | Selenium | 📝 待开发 | 占位文档已创建 |
-| Android | 📝 待开发 | 占位文档已创建 |
-| iOS | 📝 待开发 | 占位文档已创建 |
 
 ---
 
@@ -47,8 +47,8 @@
 | JS 模块 | Python 目标位置 | 优先级 |
 |---------|-----------------|--------|
 | `packages/web-integration/src/puppeteer/` | `web_integration/puppeteer/` | 低 |
-| `packages/android/` | `android/` | 中 |
-| `packages/ios/` | `ios/` | 中 |
+| `packages/android/` | `android/` | ✅ **已完成** |
+| `packages/ios/` | `ios/` | ✅ **已完成** |
 | `packages/visualizer/` | - | 低 (可复用 JS 版) |
 
 ---

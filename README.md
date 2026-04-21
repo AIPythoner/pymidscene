@@ -49,6 +49,8 @@ result = await agent.ai_query({
 - **Natural Language Automation** - Describe elements in plain English/Chinese, no selectors needed
 - **Multi-Model Support** - Works with Doubao, Qwen, GPT-4V, Claude, and other vision LLMs
 - **Playwright Integration** - Seamless integration with Playwright for web automation
+- **Android Integration** - Control real devices over ADB with `pymidscene[android]` (see [pymidscene/android/README.md](pymidscene/android/README.md))
+- **iOS Integration** - Drive iPhones / simulators through WebDriverAgent (see [pymidscene/ios/README.md](pymidscene/ios/README.md))
 - **XPath Caching** - Smart caching system compatible with Midscene.js format
 - **Visual Reports** - Generate beautiful HTML reports for debugging and sharing
 - **Type-Safe** - Full type hints for excellent IDE support

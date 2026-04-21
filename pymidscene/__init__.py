@@ -12,6 +12,29 @@ PyMidscene - Python port of Midscene AI automation framework
 from pymidscene.web_integration.playwright import PlaywrightAgent, WebPage
 from pymidscene.core.agent.agent import Agent
 
+# Android 入口 - 条件导入, adbutils 未装则占位
+try:
+    from pymidscene.android import (  # noqa: F401
+        AndroidAgent,
+        AndroidDevice,
+        AndroidDeviceOpt,
+        agent_from_adb_device,
+        get_connected_devices,
+    )
+    _HAS_ANDROID = True
+except ImportError:  # pragma: no cover
+    _HAS_ANDROID = False
+
+# iOS 入口 - 只依赖 httpx (已是主依赖), 无条件导入
+from pymidscene.ios import (  # noqa: F401
+    IOSAgent,
+    IOSDevice,
+    IOSDeviceOpt,
+    IOSWebDriverClient,
+    agent_from_webdriver_agent,
+    check_ios_environment,
+)
+
 # 基础类型
 from pymidscene.shared.types import (
     Point,
@@ -48,4 +71,24 @@ __all__ = [
     "LocateResultElement",
     "CacheConfig",
     "CacheStrategy",
+]
+
+# Android 可选导出 (装了 adbutils 才有)
+if _HAS_ANDROID:
+    __all__ += [
+        "AndroidAgent",
+        "AndroidDevice",
+        "AndroidDeviceOpt",
+        "agent_from_adb_device",
+        "get_connected_devices",
+    ]
+
+# iOS 入口 (默认带)
+__all__ += [
+    "IOSAgent",
+    "IOSDevice",
+    "IOSDeviceOpt",
+    "IOSWebDriverClient",
+    "agent_from_webdriver_agent",
+    "check_ios_environment",
 ]
