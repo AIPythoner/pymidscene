@@ -172,6 +172,40 @@ class Agent:
 
         return screenshot_b64, size
 
+    async def _capture_recording_screenshot(self) -> str:
+        """
+        Capture a screenshot for report recording, normalized to CSS-space
+        dimensions to stay consistent with `_capture_ai_screenshot` output.
+
+        On HiDPI devices (notably Android, dpr=2/3), the raw screenshot is in
+        physical pixels while `element.center` / `element.rect` live in CSS
+        pixels. If the "after" screenshot stays at physical dims while the
+        "before" one was shrunk to CSS dims (via `_capture_ai_screenshot`),
+        the report animation mid-stream swaps its underlying image to a
+        different natural size — the click-replay scale-back then uses the
+        wrong origin and the image flies to the top-left corner.
+        """
+        screenshot_b64 = await self.interface.screenshot()
+        try:
+            size = await self.interface.get_size()
+        except Exception as exc:
+            logger.debug(f"get_size failed in recording capture: {exc}")
+            return screenshot_b64
+
+        dpr = float(size.get('dpr') or 1)
+        css_width = int(size.get('width', 0))
+        css_height = int(size.get('height', 0))
+
+        if dpr != 1.0 and css_width > 0 and css_height > 0:
+            try:
+                screenshot_b64 = resize_image_base64_to_size(
+                    screenshot_b64, css_width, css_height
+                )
+            except Exception as exc:
+                logger.warning(f"Recording screenshot CSS normalization failed: {exc}")
+
+        return screenshot_b64
+
     def _build_messages(
         self,
         system_prompt: str,
@@ -968,7 +1002,7 @@ class Agent:
         if self.session_recorder:
             self.session_recorder.start_step("click", prompt)
             # 获取操作前截图
-            screenshot_before = await self.interface.screenshot()
+            screenshot_before = await self._capture_recording_screenshot()
             self.session_recorder.record_screenshot_before(screenshot_before)
 
         # 开始记录任务（旧版兼容）
@@ -1014,7 +1048,7 @@ class Agent:
 
         # 获取操作后截图
         if self.session_recorder:
-            screenshot_after = await self.interface.screenshot()
+            screenshot_after = await self._capture_recording_screenshot()
             self.session_recorder.record_screenshot_after(screenshot_after)
             self.session_recorder.complete_step("success")
             # F4:收尾本次 click 分组
@@ -1059,7 +1093,7 @@ class Agent:
         # 开始记录步骤（SessionRecorder）
         if self.session_recorder:
             self.session_recorder.start_step("input", f"{prompt}: {text}")
-            screenshot_before = await self.interface.screenshot()
+            screenshot_before = await self._capture_recording_screenshot()
             self.session_recorder.record_screenshot_before(screenshot_before)
 
         # 开始记录任务（旧版兼容）
@@ -1097,7 +1131,7 @@ class Agent:
 
         # 获取操作后截图
         if self.session_recorder:
-            screenshot_after = await self.interface.screenshot()
+            screenshot_after = await self._capture_recording_screenshot()
             self.session_recorder.record_screenshot_after(screenshot_after)
             self.session_recorder.complete_step("success")
             if _input_group:
@@ -1179,7 +1213,7 @@ class Agent:
             # M10: 成功时附加 after 截图 + 完成步骤
             if self.session_recorder:
                 try:
-                    shot_after = await self.interface.screenshot()
+                    shot_after = await self._capture_recording_screenshot()
                     self.session_recorder.record_screenshot_after(shot_after)
                 except Exception:
                     pass
@@ -1604,7 +1638,7 @@ class Agent:
 
             # 记录完成
             if self.session_recorder:
-                screenshot_after = await self.interface.screenshot()
+                screenshot_after = await self._capture_recording_screenshot()
                 self.session_recorder.record_screenshot_after(screenshot_after)
                 self.session_recorder.complete_step("success")
 
@@ -1810,7 +1844,7 @@ class Agent:
                     response=answer[:2000],
                 )
             try:
-                shot_after = await self.interface.screenshot()
+                shot_after = await self._capture_recording_screenshot()
                 self.session_recorder.record_screenshot_after(shot_after)
             except Exception:
                 pass
@@ -1897,7 +1931,7 @@ class Agent:
                             action_type.lower() or "replay",
                             step_label,
                         )
-                        shot_before = await self.interface.screenshot()
+                        shot_before = await self._capture_recording_screenshot()
                         self.session_recorder.record_screenshot_before(shot_before)
                         recorded = True
                     except Exception as exc:
@@ -1908,7 +1942,7 @@ class Agent:
 
                 if self.session_recorder and recorded:
                     try:
-                        shot_after = await self.interface.screenshot()
+                        shot_after = await self._capture_recording_screenshot()
                         self.session_recorder.record_screenshot_after(shot_after)
                         if success:
                             self.session_recorder.complete_step("success (cached)")
@@ -2317,7 +2351,7 @@ class Agent:
                 await asyncio.sleep(0.5)
 
             if self.session_recorder:
-                screenshot_after = await self.interface.screenshot()
+                screenshot_after = await self._capture_recording_screenshot()
                 self.session_recorder.record_screenshot_after(screenshot_after)
                 self.session_recorder.complete_step("success")
 
