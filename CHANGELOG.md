@@ -1,5 +1,41 @@
 # PyMidscene 更新日志
 
+## [0.3.0] - 2026-04-21
+
+### 新增
+
+- **Android 平台支持** (`pymidscene[android]`)
+  - 基于 `adbutils` 的 `AndroidDevice`(实现 `AbstractInterface`),无需 Appium
+  - `AndroidAgent` 组合式封装,暴露全部 `ai_*` 方法及 Android 专属 `back / home / recent_apps / launch / run_adb_shell / pull_down / pull_up / long_press / drag_and_drop / key_press`
+  - 非 ASCII 文本走 ADBKeyboard(IME 策略 `adb-keyboard / always-yadb / yadb-for-non-ascii`,通过 `MIDSCENE_ANDROID_IME_STRATEGY` 或 `AndroidDeviceOpt.ime_strategy` 配置)
+  - 169 条中文/英文应用名 → package 映射(`DEFAULT_APP_NAME_MAPPING`),支持 `launch("小红书")` 自动解析为 `com.xingin.xhs`
+  - 新增环境变量 `MIDSCENE_ADB_PATH / MIDSCENE_ADB_REMOTE_HOST / MIDSCENE_ADB_REMOTE_PORT / MIDSCENE_ANDROID_IME_STRATEGY`
+  - 示例:`examples/android_basic.py`;文档:`pymidscene/android/README.md`
+
+- **iOS 平台支持**(默认安装,复用已有的 `httpx` 依赖,不新增第三方包)
+  - 通用 W3C WebDriver HTTP 客户端 `pymidscene.webdriver.WebDriverClient`(基于 `httpx`)
+  - `IOSWebDriverClient` + `IOSDevice`:覆盖 tap / doubleTap / tripleTap / longPress、swipe(W3C Actions)、scroll / scroll_until_top/bottom/left/right(截图相似度判断边界)、W3C keys 文本输入(ASCII + Unicode)、dismiss_keyboard、launch_app / activate_app / terminate_app、open_url(含 Safari fallback)、home / app_switcher
+  - `IOSAgent` 组合式封装,同样暴露 `ai_*` 及 iOS 专属方法
+  - 183 条中文/英文应用名 → bundle id 映射,支持 `launch("微信")` 自动解析为 `com.tencent.xin`
+  - 新增环境变量 `MIDSCENE_WDA_HOST / MIDSCENE_WDA_PORT / MIDSCENE_WDA_BASE_URL / MIDSCENE_WDA_TIMEOUT`
+  - 示例:`examples/ios_basic.py`;文档:`pymidscene/ios/README.md`
+  - 注:不提供 JS 版 `WDAManager` 的自动 `xcodebuild` 启动能力,用户需自行用 Xcode / tidevice / 模拟器启动 WebDriverAgent
+
+### 修复
+
+- **移动端报告点击回放动画飞离左上角**
+  - 原因:`record_screenshot_before/after` 存储的截图空间不一致 —— AI 路径的 before 截图经 `_capture_ai_screenshot` 归一化到 CSS 尺寸,但 after 截图和非 AI 路径的 before 截图直接保留物理像素;单步报告里 before(CSS)+ after(物理)+ element.center(CSS)混用,click replay 的 zoom-out 阶段 transform-origin 算错 → 图片飞向左上
+  - 修复:新增 `Agent._capture_recording_screenshot()`,把所有写入报告 recorder 的截图统一归一化到 CSS 空间,覆盖全部 10 处 `record_screenshot_before/after` 调用点
+  - 影响:Web(dpr=1)无行为变化;Android / iOS(dpr=2/3)动画回落平滑,不再飞离
+
+### 其他
+
+- `README.md` / `README_CN.md`:加入 Android / iOS 特性说明,中文版增加 QQ 交流群 `2156022195`
+- `tests/android/`(FakeAdbDevice)、`tests/ios/`(httpx.MockTransport)完全离线可跑,无需真实设备或 WDA
+- `tests/core/`:补充 `test_playwright_wrapper_parity / test_prompt_modules / test_qwen_model / test_service_caller`
+- `examples/basic_usage.py`:改用 `channel='chrome'` 启动,免除 `playwright install chromium` 的前置步骤
+- `tests/test_doubao.py`:重写部分 `pytest.raises` 用法,贴近 tests/core 风格
+
 ## [0.2.0] - 2026-04-17
 
 ### 概述
