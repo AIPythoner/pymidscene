@@ -33,7 +33,7 @@ async def main():
 
     async with async_playwright() as p:
         # 启动浏览器
-        browser = await p.chromium.launch(headless=False)
+        browser = await p.chromium.launch(headless=False, channel='chrome')
         page = await browser.new_page()
 
         # 创建 Agent

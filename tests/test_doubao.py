@@ -4,7 +4,6 @@
 测试豆包模型的基本功能、坐标系统适配等。
 """
 
-import pytest
 from unittest.mock import Mock, patch, MagicMock
 from pymidscene.core.ai_model.models.doubao import DoubaoVisionModel
 
@@ -46,16 +45,24 @@ class TestDoubaoVisionModel:
     def test_missing_api_key(self):
         """测试缺少 API 密钥"""
         with patch.dict('os.environ', {}, clear=True):
-            with pytest.raises(ValueError, match="API key is required"):
+            try:
                 DoubaoVisionModel(model_name="doubao-vision")
+            except ValueError as exc:
+                assert "API key is required" in str(exc)
+            else:
+                raise AssertionError("Expected ValueError for missing API key")
 
     def test_missing_endpoint_id(self):
         """测试缺少推理接入点 ID"""
         with patch.dict('os.environ', {
             'MIDSCENE_DOUBAO_API_KEY': 'test-key'
         }):
-            with pytest.raises(ValueError, match="endpoint ID is required"):
+            try:
                 DoubaoVisionModel(model_name="doubao-vision")
+            except ValueError as exc:
+                assert "endpoint ID is required" in str(exc)
+            else:
+                raise AssertionError("Expected ValueError for missing endpoint ID")
 
 
 class TestBboxPreprocessing:
@@ -125,8 +132,8 @@ class TestBboxAdaptation:
 
         result = DoubaoVisionModel.adapt_doubao_bbox(bbox, width, height)
 
-        # 中心点 (960, 540)，创建 ±5 像素的小矩形
-        assert result == (955, 535, 965, 545)
+        # 中心点 (960, 540)，按 defaultBboxSize=20 创建 ±10 像素的小矩形
+        assert result == (950, 530, 970, 550)
 
     def test_adapt_bbox_quadrilateral(self):
         """测试四边形格式适配"""
@@ -145,8 +152,12 @@ class TestBboxAdaptation:
         bbox = [100]  # 长度为 1，无效
         width, height = 1920, 1080
 
-        with pytest.raises(ValueError, match="Unsupported bbox format"):
+        try:
             DoubaoVisionModel.adapt_doubao_bbox(bbox, width, height)
+        except ValueError as exc:
+            assert "invalid bbox data for doubao-vision mode" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for invalid bbox format")
 
     def test_adapt_bbox_edge_cases(self):
         """测试边界情况"""
@@ -269,7 +280,3 @@ class TestDeepThinkMapping:
             call_args = mock_client.chat.completions.create.call_args
             assert 'extra_body' in call_args[1]
             assert call_args[1]['extra_body']['config']['thinking']['type'] == 'disabled'
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

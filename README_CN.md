@@ -225,6 +225,10 @@ MIT License - 详见 [LICENSE](LICENSE) 文件。
 - [Midscene.js](https://github.com/web-infra-dev/midscene) - 字节跳动开发的原版 JavaScript 框架
 - [Playwright](https://playwright.dev/) - 浏览器自动化库
 
+## 交流群
+
+QQ 群：**2156022195**
+
 ---
 
 <p align="center">
