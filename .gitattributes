@@ -1,0 +1,14 @@
+# GitHub Linguist overrides
+#
+# The report template is a pre-built React bundle inherited from the JS
+# project's @midscene/visualizer — a single ~1600-line minified HTML file
+# that inlines large amounts of JS/CSS plus a WASM blob. Its size skews
+# the repo's "Languages" breakdown (HTML ≫ Python) even though this is a
+# Python library. Mark the whole report_template/ as vendored so Linguist
+# excludes it from language statistics while keeping the files visible
+# in diffs and PRs.
+
+pymidscene/resources/report_template/** linguist-vendored
+
+# Keep the bundled report template as-is — no CRLF/LF auto-conversion.
+pymidscene/resources/report_template/report.html -text

@@ -1,5 +1,11 @@
 # PyMidscene 更新日志
 
+## [Unreleased]
+
+### Chore
+
+- 新增仓库根 `.gitattributes`,把 `pymidscene/resources/report_template/**` 标为 `linguist-vendored`,避免 GitHub "Languages" 统计被巨大的预构建报告模板(从 JS `@midscene/visualizer` 继承的单文件 React bundle)拉偏为以 HTML 为主。
+
 ## [0.3.0] - 2026-04-21
 
 ### 新增
