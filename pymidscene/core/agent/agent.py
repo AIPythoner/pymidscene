@@ -5,6 +5,7 @@ Agent 核心类 - 对应 packages/core/src/agent/agent.ts
 """
 
 from typing import Optional, Dict, Any, List, Union, Tuple
+import inspect
 import time
 import asyncio
 
@@ -2314,38 +2315,49 @@ class Agent:
 
         try:
             # 如果指定了元素，先定位到元素
-            starting_point = None
+            starting_point: tuple[float, float] | None = None
             if locate_prompt:
                 element = await self.ai_locate(locate_prompt)
                 if element:
-                    starting_point = element.center
+                    starting_point = (element.center[0], element.center[1])
 
-            if scroll_type == "scrollToTop":
-                await self.interface.evaluate_javascript(
-                    "window.scrollTo(0, 0)"
+            scroll_until_methods = {
+                "scrollToTop": "scroll_until_top",
+                "scrollToBottom": "scroll_until_bottom",
+                "scrollToLeft": "scroll_until_left",
+                "scrollToRight": "scroll_until_right",
+            }
+            if scroll_type in scroll_until_methods:
+                # Android/iOS 等原生设备实现了 scroll_until_*（支持从定位元素
+                # 起手势）；web interface 没有，走 evaluate_javascript。
+                native = getattr(
+                    self.interface, scroll_until_methods[scroll_type], None
                 )
-                await asyncio.sleep(0.3)
-            elif scroll_type == "scrollToBottom":
-                await self.interface.evaluate_javascript(
-                    "window.scrollTo(0, document.body.scrollHeight)"
-                )
+                if callable(native):
+                    await native(start_point=starting_point)
+                else:
+                    scripts = {
+                        "scrollToTop": "window.scrollTo(window.scrollX, 0)",
+                        "scrollToBottom": (
+                            "window.scrollTo(window.scrollX, "
+                            "document.body.scrollHeight)"
+                        ),
+                        "scrollToLeft": "window.scrollTo(0, window.scrollY)",
+                        "scrollToRight": (
+                            "window.scrollTo(document.body.scrollWidth, "
+                            "window.scrollY)"
+                        ),
+                    }
+                    await self.interface.evaluate_javascript(
+                        scripts[scroll_type]
+                    )
                 await asyncio.sleep(0.3)
             else:
                 # singleAction
-                if starting_point:
-                    # 在特定元素上滚动（使用 mouse.wheel）
-                    await self.interface.evaluate_javascript(f"""
-                        (() => {{
-                            const el = document.elementFromPoint(
-                                {starting_point[0]}, {starting_point[1]}
-                            );
-                            if (el) {{
-                                const deltaY = {distance if direction in ('down',) else -distance if direction == 'up' else 0};
-                                const deltaX = {distance if direction == 'right' else -distance if direction == 'left' else 0};
-                                el.scrollBy(deltaX, deltaY);
-                            }}
-                        }})()
-                    """)
+                if starting_point is not None:
+                    await self._scroll_from_point(
+                        direction, distance, starting_point
+                    )
                 else:
                     await self.interface.scroll(direction, distance)
                 await asyncio.sleep(0.5)
@@ -2362,6 +2374,61 @@ class Agent:
             if self.session_recorder:
                 self.session_recorder.fail_step(str(e))
             return False
+
+    async def _scroll_from_point(
+        self,
+        direction: str,
+        distance: int,
+        starting_point: tuple[float, float],
+    ) -> None:
+        """
+        从指定起点（AI 定位到的元素中心）单次滚动。
+
+        优先用 interface 原生的起点参数（Android/iOS 的 `start_point`、
+        Playwright 的 `starting_point`），都没有时回退到
+        `elementFromPoint().scrollBy()` 脚本（仅对 web 有效）。
+        """
+        try:
+            params = inspect.signature(self.interface.scroll).parameters
+        except (TypeError, ValueError):
+            params = {}
+
+        if "start_point" in params:
+            await self.interface.scroll(
+                direction, distance, start_point=starting_point
+            )
+            return
+        if "starting_point" in params:
+            await self.interface.scroll(
+                direction,
+                distance,
+                starting_point={
+                    "x": starting_point[0],
+                    "y": starting_point[1],
+                },
+            )
+            return
+
+        delta_y = (
+            distance
+            if direction == "down"
+            else -distance if direction == "up" else 0
+        )
+        delta_x = (
+            distance
+            if direction == "right"
+            else -distance if direction == "left" else 0
+        )
+        await self.interface.evaluate_javascript(f"""
+            (() => {{
+                const el = document.elementFromPoint(
+                    {starting_point[0]}, {starting_point[1]}
+                );
+                if (el) {{
+                    el.scrollBy({delta_x}, {delta_y});
+                }}
+            }})()
+        """)
 
     def get_cache_stats(self) -> Optional[Dict[str, Any]]:
         """获取缓存统计信息"""

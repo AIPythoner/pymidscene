@@ -136,6 +136,20 @@ class TestScroll:
         with pytest.raises(ValueError):
             await ios_device.scroll("diagonal", 10)
 
+    async def test_single_scroll_with_start_point(self, ios_device, fake_wda):
+        await ios_device.scroll("down", 200, start_point=(100, 300))
+        body = fake_wda.calls_for("POST", "/actions")[-1][2]
+        moves = [
+            a
+            for a in body["actions"][0]["actions"]
+            if a["type"] == "pointerMove"
+        ]
+        # 手势从定位元素中心起步
+        assert (moves[0]["x"], moves[0]["y"]) == (100, 300)
+        # scroll down = 手指上滑: x 不变, 终点 y = 300 - 200
+        assert moves[-1]["x"] == 100
+        assert moves[-1]["y"] == 100
+
 
 @pytest.mark.asyncio
 class TestKeyboardInput:

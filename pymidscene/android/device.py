@@ -148,6 +148,50 @@ def _should_use_yadb(text: str) -> bool:
     return bool(_NON_ASCII_RE.search(text) or _FORMAT_SPEC_RE.search(text))
 
 
+def _calculate_scroll_end_point(
+    start: tuple[int, int],
+    delta_x: int,
+    delta_y: int,
+    max_width: int,
+    max_height: int,
+) -> tuple[int, int]:
+    """
+    对齐 JS `calculateScrollEndPoint`: 从 start 出发的手势终点,
+    裁剪到屏幕内, 且保证 Android 能识别手势的最小 50px 距离.
+
+    delta 为手势位移 (正 = 手指向右/向下).
+    """
+    min_scroll_distance = 50
+
+    actual_x = 0
+    if delta_x != 0:
+        max_available_x = max_width - start[0] if delta_x > 0 else start[0]
+        actual_x = min(abs(delta_x), max_available_x)
+        actual_x = max(min(min_scroll_distance, actual_x), actual_x)
+
+    actual_y = 0
+    if delta_y != 0:
+        max_available_y = max_height - start[1] if delta_y > 0 else start[1]
+        actual_y = min(abs(delta_y), max_available_y)
+        actual_y = max(min(min_scroll_distance, actual_y), actual_y)
+
+    if delta_x == 0:
+        end_x = start[0]
+    elif delta_x > 0:
+        end_x = min(max_width, start[0] + actual_x)
+    else:
+        end_x = max(0, start[0] - actual_x)
+
+    if delta_y == 0:
+        end_y = start[1]
+    elif delta_y > 0:
+        end_y = min(max_height, start[1] + actual_y)
+    else:
+        end_y = max(0, start[1] - actual_y)
+
+    return (round(end_x), round(end_y))
+
+
 def _shell_escape(text: str) -> str:
     """
     为 `adb shell input text "..."` 做最小必要转义.
@@ -260,8 +304,9 @@ class AndroidDevice(AbstractInterface):
         )
 
         if adb_path:
-            # adbutils 通过环境变量 ADB_PATH 指定 adb 可执行文件位置
-            os.environ.setdefault("ADB_PATH", adb_path)
+            # adbutils 通过环境变量 ADBUTILS_ADB_PATH 指定 adb 可执行文件位置
+            # (见 adbutils._utils.adb_path); 显式传入的选项优先于已有环境.
+            os.environ["ADBUTILS_ADB_PATH"] = adb_path
 
         if adb_host:
             port = int(adb_port) if adb_port else 5037
@@ -311,14 +356,15 @@ class AndroidDevice(AbstractInterface):
             return f" -d {self.options.display_id}"
         return ""
 
-    async def shell(self, command: str) -> str:
+    async def shell(self, command: str, timeout: float | None = 60.0) -> str:
         """
         执行 adb shell 命令, 返回 stdout 字符串.
 
-        对齐 JS 的 `adb.shell`.
+        对齐 JS 的 `adb.shell` (appium-adb `adbExecTimeout` 默认 60s);
+        无超时会在设备 offline/卡死时永久挂起协程.
         """
         device = self._require_device()
-        return await asyncio.to_thread(device.shell, command)
+        return await asyncio.to_thread(device.shell, command, timeout=timeout)
 
     async def run_adb_shell(self, command: str) -> str:
         """对齐 JS `AndroidAgent.runAdbShell`."""
@@ -606,6 +652,7 @@ class AndroidDevice(AbstractInterface):
         self,
         direction: str,
         distance: Optional[int] = None,
+        start_point: tuple[float, float] | None = None,
     ) -> None:
         """
         AbstractInterface 契约: ``scroll(direction, distance)``.
@@ -616,6 +663,9 @@ class AndroidDevice(AbstractInterface):
         - direction='left'/'right' 同理
 
         distance 为屏幕像素 (AI 坐标空间). 默认使用屏幕宽/高.
+        start_point: 手势起点 (如 AI 定位到的元素中心); 对齐 JS
+        `scrollUp/Down/Left/Right` 的 startPoint 分支, 终点经
+        `calculateScrollEndPoint` 裁剪到屏幕内.
         """
         direction = (direction or "down").lower()
         if direction not in ("up", "down", "left", "right"):
@@ -626,9 +676,27 @@ class AndroidDevice(AbstractInterface):
         height = int(size["height"])
         if direction in ("up", "down"):
             d = int(distance) if distance else height
-            delta = (0, -d if direction == "up" else d)
         else:
             d = int(distance) if distance else width
+
+        if start_point is not None:
+            start = (round(start_point[0]), round(start_point[1]))
+            # 注意手势方向与 direction 相反: scroll up = 手指向下滑
+            gesture_delta = {
+                "up": (0, d),
+                "down": (0, -d),
+                "left": (d, 0),
+                "right": (-d, 0),
+            }[direction]
+            end = _calculate_scroll_end_point(
+                start, gesture_delta[0], gesture_delta[1], width, height
+            )
+            await self.mouse_drag(start, end)
+            return
+
+        if direction in ("up", "down"):
+            delta = (0, -d if direction == "up" else d)
+        else:
             delta = (-d if direction == "left" else d, 0)
         await self._scroll_raw(delta[0], delta[1])
 
@@ -858,6 +926,8 @@ class AndroidDevice(AbstractInterface):
             ok = await self._type_via_adb_keyboard(text)
             if not ok:
                 await self._type_via_input_text(text)
+            if self.options.auto_dismiss_keyboard:
+                await self.hide_keyboard()
             return
 
         if strategy == IME_STRATEGY_ADB_KEYBOARD and use_yadb:
@@ -884,14 +954,15 @@ class AndroidDevice(AbstractInterface):
     async def _type_via_adb_keyboard(self, text: str) -> bool:
         """ADBKeyboard 广播输入. 设备需预装 ADBKeyboard.apk 并设为默认 IME."""
         try:
-            # 转义 double-quote / backslash
-            msg = text.replace("\\", "\\\\").replace('"', '\\"')
-            cmd = (
-                f'am broadcast -a ADB_INPUT_TEXT --es msg "{msg}"'
-            )
-            out = await self.shell(cmd)
-            # 正常广播输出包含 "Broadcast completed: result=-1"
-            return "Broadcast completed" in out or "result=-1" in out
+            # 走 base64 通道 (ADB_INPUT_B64): 明文 --es msg 在不同 ROM/shell
+            # 下对非 ASCII 的引号转义不可靠, 而 base64 是 ADBKeyboard 官方
+            # 推荐的 Unicode 输入方式.
+            b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            out = await self.shell(f"am broadcast -a ADB_INPUT_B64 --es msg {b64}")
+            # 只有 ADBKeyboard 的接收器真正处理了广播, 输出才是 result=-1;
+            # 未安装时 `am broadcast` 也会输出 "Broadcast completed: result=0",
+            # 所以不能只看 "Broadcast completed".
+            return "result=-1" in out
         except Exception as exc:
             logger.debug(f"ADBKeyboard broadcast failed: {exc}")
             return False
@@ -916,7 +987,8 @@ class AndroidDevice(AbstractInterface):
         is_shown = await asyncio.to_thread(self._is_keyboard_shown, device)
         if not is_shown:
             return False
-        key_codes = [111, 4] if strategy == "esc-first" else [4, 111]
+        # 对齐 JS: 只有显式 back-first 才先 BACK, 未知取值按默认 esc-first
+        key_codes = [4, 111] if strategy == "back-first" else [111, 4]
         interval = 0.1
         for key_code in key_codes:
             await self.shell(f"input{self._display_arg()} keyevent {key_code}")

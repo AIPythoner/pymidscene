@@ -148,6 +148,10 @@ class WebDriverClient:
             }
         }
         response = await self.make_request("POST", "/session", payload)
+        if not isinstance(response, dict):
+            raise WebDriverError(
+                f"Unexpected non-JSON response from POST /session: {response!r}"
+            )
         # 兼容新老响应结构
         session_id = response.get("sessionId") or response.get("value", {}).get(
             "sessionId"

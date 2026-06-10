@@ -119,7 +119,9 @@ class AndroidAgent:
         timeout: float = 30,
         interval: float = 2,
     ) -> bool:
-        return await self._agent.ai_wait_for(assertion, timeout, interval)
+        return await self._agent.ai_wait_for(
+            assertion, timeout=timeout, interval=interval
+        )
 
     async def ai_scroll(
         self,
@@ -238,6 +240,10 @@ class AndroidAgent:
             if self._agent.session_recorder.current_step:
                 self._agent.session_recorder.fail_step(str(exc_val))
         self.finish()
+        try:
+            await self._device.destroy()
+        except Exception:
+            pass
         # 不吞异常
         return False
 

@@ -282,10 +282,6 @@ class IOSWebDriverClient(WebDriverClient):
 
         raise WebDriverError(f'Key "{normalized}" is not supported on iOS')
 
-    @staticmethod
-    def _normalize_key_name(key: str) -> str:
-        return key[0].upper() + key[1:].lower()
-
     async def _send_keys(self, values: list[str]) -> None:
         await self.make_request(
             "POST",

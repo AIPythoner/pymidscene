@@ -124,6 +124,11 @@ class IOSDevice(AbstractInterface):
     # 生命周期
     # ------------------------------------------------------------------
 
+    @property
+    def app_name_mapping(self) -> dict[str, str]:
+        """当前生效的 app 名 → bundle id 映射."""
+        return self._app_name_mapping
+
     def set_app_name_mapping(self, mapping: dict[str, str]) -> None:
         """对齐 JS `setAppNameMapping`."""
         self._app_name_mapping = dict(mapping)
@@ -158,8 +163,8 @@ class IOSDevice(AbstractInterface):
         self._destroyed = True
         try:
             await self.wda.delete_session()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"delete_session during destroy failed: {exc}")
         await self.wda.aclose()
 
     def describe(self) -> str:
@@ -174,11 +179,13 @@ class IOSDevice(AbstractInterface):
             return
         scale = await self.wda.get_screen_scale()
         if not scale or scale <= 0:
-            logger.warning(
-                "Failed to get DPR from WDA, defaulting to 1.0 "
-                "(可能影响坐标精度)"
+            # 对齐 JS: 拿不到 DPR 直接报错. 静默回退 1.0 会让 Retina 设备
+            # 上截图(物理像素)与坐标(逻辑点)的换算全部错位且无显式失败.
+            raise RuntimeError(
+                "Failed to get device pixel ratio from WebDriverAgent. "
+                "Check the WDA /wda/screen endpoint, or install Pillow so "
+                "the screenshot-based fallback can be used."
             )
-            scale = 1.0
         self._device_pixel_ratio = float(scale)
         self._dpr_initialized = True
 
@@ -251,12 +258,16 @@ class IOSDevice(AbstractInterface):
         self,
         direction: str,
         distance: Optional[int] = None,
+        start_point: tuple[float, float] | None = None,
     ) -> None:
         """
         单次滚动. direction: ``up`` / ``down`` / ``left`` / ``right``.
 
         语义: direction 指"屏幕内容移动方向" -- down 表示向下滚动更多内容
         (手指上滑).
+
+        start_point: 手势起点 (如 AI 定位到的元素中心), 默认屏幕中心.
+        对齐 JS `scrollUp/Down/Left/Right` 的 startPoint 分支.
         """
         direction = (direction or "down").lower()
         if direction not in ("up", "down", "left", "right"):
@@ -266,8 +277,12 @@ class IOSDevice(AbstractInterface):
         width = int(size["width"])
         height = int(size["height"])
 
-        sx = width // 2
-        sy = height // 2
+        if start_point is not None:
+            sx = round(start_point[0])
+            sy = round(start_point[1])
+        else:
+            sx = width // 2
+            sy = height // 2
 
         if direction in ("up", "down"):
             d = int(distance) if distance else height // 3
@@ -404,14 +419,14 @@ class IOSDevice(AbstractInterface):
         """直接输入文本 (已聚焦输入框). 名字和 WDA 一致."""
         await self.wda.type_text(text)
 
-    async def clear_input(self) -> bool:
+    async def clear_input(self) -> None:
         """
         清空当前焦点输入框. 对齐 JS `clearInput` 的纯输入部分.
 
-        Returns:
-            是否清空成功.
+        与 AndroidDevice.clear_input 签名保持一致 (返回 None);
+        需要成功与否时直接调 `wda.clear_active_element()`.
         """
-        return await self.wda.clear_active_element()
+        await self.wda.clear_active_element()
 
     async def hide_keyboard(self) -> bool:
         """对齐 JS `hideKeyboard`."""
@@ -457,6 +472,9 @@ class IOSDevice(AbstractInterface):
         self.uri = uri
         if _URL_SCHEME_RE.match(uri):
             await self.wda.open_url(uri)
+            # 对齐 JS `openUrl` 的 waitTime (默认 2000ms): 等页面加载稳定,
+            # 否则紧接着的截图/操作会拿到打开中的过渡画面.
+            await asyncio.sleep(2.0)
         else:
             resolved = resolve_bundle_id(uri, self._app_name_mapping) or uri
             await self.wda.launch_app(resolved)

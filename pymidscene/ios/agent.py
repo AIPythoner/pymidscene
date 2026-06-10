@@ -11,7 +11,6 @@ from typing import Any, Dict, Optional
 from ..core.agent.agent import Agent
 from ..shared.logger import logger
 from ..shared.types import LocateResultElement
-from .app_name_mapping import DEFAULT_APP_NAME_MAPPING
 from .device import IOSDevice
 
 
@@ -38,8 +37,12 @@ class IOSAgent:
         app_name_mapping: Optional[Dict[str, str]] = None,
     ) -> None:
         self._device = device
-        merged = {**DEFAULT_APP_NAME_MAPPING, **(app_name_mapping or {})}
-        device.set_app_name_mapping(merged)
+        # device 构造时已合入 DEFAULT + IOSDeviceOpt.app_name_mapping;
+        # 这里只把 agent 级映射叠加上去, 不能整体覆盖丢掉 device 级配置.
+        if app_name_mapping:
+            device.set_app_name_mapping(
+                {**device.app_name_mapping, **app_name_mapping}
+            )
 
         self._agent = Agent(
             interface=device,
@@ -91,7 +94,9 @@ class IOSAgent:
         timeout: float = 30,
         interval: float = 2,
     ) -> bool:
-        return await self._agent.ai_wait_for(assertion, timeout, interval)
+        return await self._agent.ai_wait_for(
+            assertion, timeout=timeout, interval=interval
+        )
 
     async def ai_scroll(
         self,

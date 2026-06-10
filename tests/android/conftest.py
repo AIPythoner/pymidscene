@@ -68,7 +68,7 @@ class FakeAdbDevice:
             responder = lambda _cmd, _t=text: _t  # noqa: E731
         self._shell_responders.insert(0, (pattern, responder))
 
-    def shell(self, cmd: str) -> str:
+    def shell(self, cmd: str, timeout: float | None = None) -> str:  # noqa: ARG002
         self.shell_calls.append(cmd)
         for pattern, responder in self._shell_responders:
             if re.search(pattern, cmd):

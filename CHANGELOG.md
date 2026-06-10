@@ -2,9 +2,33 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-11
+
+本次为 Android / iOS 移植的审查修复版:对照 JS 源做了一轮移植保真度 + 代码质量审查,修掉一批"静默失效"类 bug。
+
+### Fixed
+
+- **core: `ai_scroll` 在 Android/iOS 上多处静默 no-op**
+  - `scrollToTop/Bottom/Left/Right` 现直接路由到设备原生 `scroll_until_*`(并把 AI 定位到的元素中心作为手势起点传入);此前经 `evaluate_javascript` 转译,`scrollToLeft/Right` 完全不可达
+  - 带 `locate_prompt` 的单次滚动现从元素中心做原生手势:`AndroidDevice.scroll` / `IOSDevice.scroll` 新增 `start_point` 参数(Android 侧移植了 JS `calculateScrollEndPoint` 的边界裁剪 + 50px 最小手势距离);此前走 `document.elementFromPoint().scrollBy()` 脚本,被移动端忽略且报告"成功"
+  - Playwright 路径改为直接传 `starting_point`(mouse.wheel 起点),不再注入 JS
+- **Android: 自定义 adb 路径完全不生效** —— `MIDSCENE_ADB_PATH` / `android_adb_path` 此前写入无消费者的 `ADB_PATH` 环境变量;现写 adbutils 实际读取的 `ADBUTILS_ADB_PATH`
+- **Android: 未装 ADBKeyboard 时非 ASCII 输入静默丢失** —— 广播成功判定此前只要输出含 "Broadcast completed" 即视为成功(`am broadcast` 在无接收者时也输出该字样),永远不会走 `input text` fallback 也不警告;现仅认 `result=-1`。同时改用 ADBKeyboard 官方推荐的 `ADB_INPUT_B64` base64 通道,避免非 ASCII 明文穿越 adb shell 引号转义不可靠
+- Android: `always-yadb` / `yadb-for-non-ascii` IME 策略分支输入后此前跳过收键盘;现同样尊重 `auto_dismiss_keyboard`(对齐 JS)
+- Android: `hide_keyboard` 对未知 `keyboard_dismiss_strategy` 取值此前按 back-first;现对齐 JS 按默认 esc-first
+- Android: 所有 `adb shell` 调用加 60s 默认超时(对齐 appium-adb `adbExecTimeout`);此前设备 offline/卡死会永久挂起协程
+- Android: `async with AndroidAgent(...)` 退出时现调用 `device.destroy()` 释放 ADB 连接(与 `IOSAgent` 对齐)
+- **iOS: DPR 获取失败改为抛错**(对齐 JS assert);此前静默回退 1.0,在 2x/3x 屏上截图与坐标换算全部错位且无显式失败
+- iOS: `launch(url)` 打开 URL 后补上 JS 版默认的 2s 稳定等待,避免紧接着的截图/操作拿到加载中的过渡画面
+- iOS: `IOSAgent` 此前无条件覆盖 device 级 `app_name_mapping`,导致 `IOSDeviceOpt(app_name_mapping=...)` 被丢弃;现叠加合并
+- iOS: `IOSDevice.clear_input` 返回类型与 Android 统一为 `None`
+- Android/iOS Agent: `ai_wait_for(timeout=30, interval=2)`(单位秒)此前按位置参数传给 core 的 `timeout_ms/check_interval_ms`,实际只等 30ms;现走 core 的秒兼容关键字参数
+- webdriver: `create_session` 收到非 JSON 响应时现抛可读的 `WebDriverError`,此前是 `AttributeError`
+
 ### Chore
 
 - 新增仓库根 `.gitattributes`,把 `pymidscene/resources/report_template/**` 标为 `linguist-vendored`,避免 GitHub "Languages" 统计被巨大的预构建报告模板(从 JS `@midscene/visualizer` 继承的单文件 React bundle)拉偏为以 HTML 为主。
+- 删除 `IOSWebDriverClient._normalize_key_name` 死代码;`tests/core/test_agent_scroll_routing.py` 新增 ai_scroll 路由回归测试;Android/iOS 设备测试补充 start_point 手势与 ADBKeyboard fallback 断言
 
 ## [0.3.0] - 2026-04-21
 

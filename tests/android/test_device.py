@@ -189,6 +189,21 @@ class TestScrolling:
         with pytest.raises(ValueError):
             await android_device.scroll("diagonal", 10)
 
+    async def test_scroll_with_start_point_drags_from_element(
+        self, android_device, fake_adb_device
+    ):
+        await android_device.connect()
+        await android_device.scroll("down", 300, start_point=(100, 200))
+        swipe = [
+            c for c in fake_adb_device.shell_calls if "input swipe" in c
+        ][-1]
+        parts = swipe.split()
+        i = parts.index("swipe")
+        x1, y1, x2, y2 = (int(p) for p in parts[i + 1 : i + 5])
+        # scroll down = 手指向上滑: x 不变, 终点 y 小于起点 y
+        assert x2 == x1
+        assert y2 < y1
+
     async def test_scroll_until_top_loops(self, android_device, fake_adb_device):
         await android_device.connect()
         await android_device.scroll_until_top()
@@ -246,9 +261,9 @@ class TestKeyboardAndInput:
     async def test_input_text_non_ascii_tries_adb_keyboard(
         self, android_device, fake_adb_device
     ):
-        # ADB 广播返回正常完成字样 → 走 ADBKeyboard 路径
+        # ADB 广播被 ADBKeyboard 接收 (result=-1) → 走 ADBKeyboard 路径
         fake_adb_device.on_shell(
-            r"am broadcast -a ADB_INPUT_TEXT",
+            r"am broadcast -a ADB_INPUT_B64",
             "Broadcasting: Intent ...\nBroadcast completed: result=-1",
         )
         await android_device.connect()
@@ -257,7 +272,27 @@ class TestKeyboardAndInput:
             c for c in fake_adb_device.shell_calls if "am broadcast" in c
         ]
         assert am_calls, "expected an ADBKeyboard broadcast"
-        assert "小红书" in am_calls[0]
+        expected_b64 = base64.b64encode("小红书".encode()).decode("ascii")
+        assert expected_b64 in am_calls[0]
+        # 不应再退回 input text
+        assert not any(
+            "input text" in c for c in fake_adb_device.shell_calls
+        )
+
+    async def test_adb_keyboard_not_installed_falls_back(
+        self, android_device, fake_adb_device
+    ):
+        # 未安装 ADBKeyboard 时 `am broadcast` 也会输出
+        # "Broadcast completed: result=0" → 必须判定为失败并退回 input text
+        fake_adb_device.on_shell(
+            r"am broadcast -a ADB_INPUT_B64",
+            "Broadcasting: Intent ...\nBroadcast completed: result=0",
+        )
+        await android_device.connect()
+        await android_device.keyboard_type("小红书")
+        assert any(
+            "input text" in c for c in fake_adb_device.shell_calls
+        ), fake_adb_device.shell_calls
 
     async def test_input_text_clear_first_deletes(
         self, android_device, fake_adb_device
