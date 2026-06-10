@@ -49,6 +49,9 @@ You will receive a screenshot of the current page state and a task description.
 6. **Sleep** - Wait for a specified time
    - param: {{ "timeMs": 1000 }}
 
+7. **LongPress** - Press and hold on an element (mobile context menus, drag handles)
+   - param: {{ "prompt": "element description" }}
+
 ## Output Format:
 Return a JSON object with this structure:
 ```json

@@ -2,7 +2,25 @@
 
 ## [Unreleased]
 
-## [0.3.3] - 2026-06-11
+## [0.3.4] - 2026-06-11
+
+第四轮审查收尾:报告元素详情面板、报告体积、LongPress 动作链路、Android 启动/截图健壮性。
+
+### Fixed
+
+**报告:**
+
+- **Insight / Locate 任务写入 `task.log`(JS `ServiceDump` 结构)**:查看器的元素详情面板(detail-side)从 `log.matchedElement` 读取数据 —— 此前 Python 从不写 `log`,该面板永远为空。Locate 带 `userQuery.element`/`matchedElement`/`matchedRect`,Assert 带 `assertion`/`assertionPass`/`assertionThought`,Query 类带 `dataDemand`/`data`,`taskInfo` 含耗时/rawResponse/usage
+- **移除 `markedScreenshot` 字段**:JS 查看器无任何消费方,此前每个定位步骤白白多存一整张带标注的 base64 截图(报告体积显著下降);顶层 `matchedElement` 保留向后兼容
+
+**动作链路:**
+
+- **LongPress 全链路打通**:执行器新增 LongPress 分支(路由到各平台 `long_press`,Android 2000ms / iOS 1000ms / web 500ms 默认值);`WebPage.long_press` 按 JS base-page.ts:671-695 实现(duration 夹在 300-600ms);auto-GLM 规划出的 "Long Press" 不再被降级成 Tap(移动端长按与点按是完全不同的交互);通用 planner prompt 向 AI 暴露 LongPress 动作
+
+**Android:**
+
+- **launch() 失败不再静默成功**:`am start`/`monkey` 出错时打印到 stdout 但 exit code 为 0,现解析输出中的 Error/Exception 等标志并抛错(对齐 JS 的 "Failed to launch" 包装);"Warning: Activity not started"(app 已在前台)正确视为成功;URI 启动加 `-W` 等待;monkey 启动失败(无 LAUNCHER category)fallback 到 `am start -a MAIN -c LAUNCHER`
+- **截图加 PNG 魔数校验**(对齐 JS device.ts:917-946):screencap 失败返回错误文本时显式报错;adbutils 截图传 `error_ok=False`,不再在失败时静默返回纯黑图
 
 第三轮审查修复:清掉 0.3.2 审查中确认的遗留问题(架构级 + 行为发散 + 报告)。
 

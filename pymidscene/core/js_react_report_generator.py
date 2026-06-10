@@ -168,7 +168,6 @@ class ExecutionTask:
     # 模型与原始响应 (F1)
     modelName: Optional[str] = None
     rawResponse: Optional[str] = None
-    markedScreenshot: Optional[str] = None  # bbox 标注后的截图
 
     # 错误信息
     error: Optional[str] = None
@@ -209,9 +208,6 @@ class ExecutionTask:
             result["modelName"] = self.modelName
         if self.rawResponse:
             result["rawResponse"] = self.rawResponse
-        if self.markedScreenshot:
-            # JS visualizer 期望的 key:与普通 recorder 截图并列存放
-            result["markedScreenshot"] = {"base64": self.markedScreenshot}
         if self.error:
             result["error"] = self.error
         if self.errorStack:
@@ -398,7 +394,6 @@ class JSReactReportGenerator:
         # --- F1: 新增字段透传 ---
         ai_model: Optional[str] = None,
         ai_response: Optional[str] = None,
-        screenshot_marked: Optional[str] = None,
         # --- F2: 缓存命中 ---
         hit_by: Optional[Dict[str, Any]] = None,
         # --- F4: 执行分组;同一 group_key 的任务合并到同一个 execution ---
@@ -581,6 +576,53 @@ class JSReactReportGenerator:
             "screenshot": screenshot_for_context,
         }
         
+        # Insight 任务写 task.log(JS ServiceDump, core/types.ts:147-164):
+        # 查看器的元素详情面板(detail-side)从 task.log.matchedElement 读数据,
+        # 顶层 matchedElement 无消费方(仅保留向后兼容).
+        log_dump: dict[str, Any] | None = None
+        if task_type == "Insight" or (
+            task_type == "Planning" and sub_type == "Locate"
+        ):
+            insight_type = {
+                "Locate": "locate",
+                "Assert": "assert",
+                "WaitFor": "assert",
+            }.get(sub_type or "", "extract")
+            user_query: dict[str, Any] = {}
+            if sub_type == "Locate":
+                user_query["element"] = prompt or ""
+            elif insight_type == "assert":
+                user_query["assertion"] = prompt or ""
+            else:
+                user_query["dataDemand"] = prompt or ""
+            task_info: dict[str, Any] = {"durationMs": duration_ms}
+            if ai_response:
+                task_info["rawResponse"] = ai_response
+            if usage:
+                task_info["usage"] = usage.to_dict()
+            log_dump = {
+                "type": insight_type,
+                "logTime": ts,
+                "logId": uuid.uuid4().hex,
+                "userQuery": user_query,
+                "matchedElement": (
+                    [e.to_dict() for e in matched_element]
+                    if matched_element
+                    else []
+                ),
+                "data": output,
+                "taskInfo": task_info,
+            }
+            if element_rect:
+                log_dump["matchedRect"] = element_rect
+            if insight_type == "assert" and isinstance(output, dict):
+                if "pass" in output:
+                    log_dump["assertionPass"] = output["pass"]
+                if output.get("thought"):
+                    log_dump["assertionThought"] = output["thought"]
+            if error:
+                log_dump["error"] = error
+
         task = ExecutionTask(
             type=task_type,
             subType=sub_type,
@@ -593,10 +635,10 @@ class JSReactReportGenerator:
             matchedElement=matched_element,
             timing=timing,
             usage=usage,
+            log=log_dump,
             hitBy=hit_by,  # F2
             modelName=ai_model,  # F1
             rawResponse=ai_response,  # F1
-            markedScreenshot=screenshot_marked,  # F1
             error=error if error else None,
             errorMessage=error if error else None,
         )

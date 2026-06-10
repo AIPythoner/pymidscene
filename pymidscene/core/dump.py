@@ -639,7 +639,6 @@ class SessionRecorder:
                 ai_completion_tokens=step.ai_completion_tokens,  # F1
                 ai_model=step.ai_model,  # F1
                 ai_response=step.ai_response,  # F1
-                screenshot_marked=step.screenshot_marked,  # F1
                 hit_by=step.hit_by,  # F2
                 group_key=group_key,  # F4
                 group_name=group_name,  # F4

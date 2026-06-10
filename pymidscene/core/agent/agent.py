@@ -2254,6 +2254,30 @@ class Agent:
                     return True
                 return False
 
+            elif action_upper in ("LongPress", "longPress", "Long Press"):
+                duration = param.get("duration", param.get("durationMs"))
+                center = _extract_center(param)
+                if center is None:
+                    prompt = _extract_prompt(param)
+                    if not prompt:
+                        return False
+                    element = await self.ai_locate_with_scroll_retry(prompt)
+                    if not element:
+                        return False
+                    center = (element.center[0], element.center[1])
+                if hasattr(self.interface, "long_press"):
+                    if duration:
+                        await self.interface.long_press(
+                            center[0], center[1], int(duration)
+                        )
+                    else:
+                        # 不传 duration, 让各平台用自己的默认值
+                        # (Android 2000ms / iOS 1000ms / web 500ms)
+                        await self.interface.long_press(center[0], center[1])
+                    return True
+                logger.warning("Interface does not support long_press")
+                return False
+
             elif action_upper in ("RightClick", "rightClick", "RightSingle"):
                 center = _extract_center(param)
                 if center is not None and hasattr(self.interface, "right_click"):

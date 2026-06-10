@@ -142,15 +142,15 @@ def transform_auto_glm_action(
         }]
 
     if action == "Long Press":
-        # Web has no native long-press; approximate as mouse-down hold via
-        # DragAndDrop of zero length (dispatcher falls back to normal click +
-        # warning if drag_and_drop missing).
+        # 透传为 LongPress: 执行器路由到 interface.long_press
+        # (Android/iOS/Playwright 均有实现). 长按与点按在移动端是
+        # 完全不同的交互, 不能降级成 Tap.
         elem = parsed.get("element") or [0, 0]
         loc = _locate_for_point(elem[0], elem[1], width, height, think)
         return [{
-            "type": "Tap",
+            "type": "LongPress",
             "param": {"locate": loc},
-            "thought": f"[LongPress→Tap] {think}",
+            "thought": think,
         }]
 
     if action == "Swipe":

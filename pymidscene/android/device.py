@@ -538,6 +538,13 @@ class AndroidDevice(AbstractInterface):
 
         if not png_bytes:
             raise RuntimeError("Failed to capture screenshot: all methods failed")
+        # 对齐 JS device.ts:917-946 / 990-992 的 PNG 魔数校验:
+        # screencap 失败时可能返回错误文本而非图片, 必须显式报错
+        if png_bytes[:8] != b"\x89PNG\r\n\x1a\n":
+            raise RuntimeError(
+                "Screenshot data is not a valid PNG "
+                f"(first bytes: {png_bytes[:8]!r})"
+            )
         if min_bytes > 0 and len(png_bytes) < min_bytes:
             raise RuntimeError(
                 f"Screenshot buffer too small: {len(png_bytes)} bytes "
@@ -546,15 +553,23 @@ class AndroidDevice(AbstractInterface):
         return base64.b64encode(png_bytes).decode("ascii")
 
     def _screenshot_via_adbutils(self, device: Any) -> Any:
-        """adbutils 的 screenshot. 支持 display_id."""
+        """adbutils 的 screenshot. 支持 display_id.
+
+        `error_ok=False`: adbutils 默认在 screencap 失败时返回纯黑图
+        而不是抛错 —— 用户把 min_screenshot_buffer_size 设为 0 时会
+        静默拿到黑图.
+        """
         display_id = self.options.display_id
         if display_id is not None:
             try:
-                return device.screenshot(display_id=display_id)
+                return device.screenshot(display_id=display_id, error_ok=False)
             except TypeError:
-                # 旧版本 adbutils 不支持 display_id 参数
+                # 旧版本 adbutils 不支持 display_id / error_ok 参数
                 pass
-        return device.screenshot()
+        try:
+            return device.screenshot(error_ok=False)
+        except TypeError:
+            return device.screenshot()
 
     async def _screenshot_via_screencap(self) -> bytes:
         """shell screencap + adb pull 的 fallback 实现."""
@@ -1032,19 +1047,54 @@ class AndroidDevice(AbstractInterface):
             raise ValueError("launch requires a non-empty uri")
         self.uri = uri
 
-        if "://" in uri:
-            await self.shell(
-                f'am start -a android.intent.action.VIEW -d "{uri}"'
+        # `am start` / `monkey` 出错时打印到 stdout 但 exit code 仍是 0,
+        # 必须解析输出, 否则启动失败被静默当成成功(对齐 JS 的
+        # `Failed to launch ...` 包装, device.ts:473-477).
+        def _check_launch_output(out: str, target: str) -> None:
+            lowered = (out or "").lower()
+            # 注意: "Warning: Activity not started, its current task has been
+            # brought to the front" 是成功场景(app 已在前台), 不能算失败.
+            markers = (
+                "error:",
+                "error type",
+                "exception",
+                "unable to resolve intent",
+                "no activities found",
+                "monkey aborted",
             )
+            if any(m in lowered for m in markers):
+                raise RuntimeError(
+                    f"Failed to launch '{target}': {out.strip()[:300]}"
+                )
+
+        if "://" in uri:
+            # -W 等待启动完成(对齐 appium-adb startUri 默认行为)
+            out = await self.shell(
+                f'am start -W -a android.intent.action.VIEW -d "{uri}"'
+            )
+            _check_launch_output(out, uri)
         elif "/" in uri:
             pkg, activity = uri.split("/", 1)
-            await self.shell(f"am start -n {pkg}/{activity}")
+            out = await self.shell(f"am start -W -n {pkg}/{activity}")
+            _check_launch_output(out, uri)
         else:
             resolved = resolve_package_name(uri, self._app_name_mapping) or uri
-            # 使用 monkey 启动 launcher intent (比 am start 更通用, 无需知道 activity)
-            await self.shell(
+            # monkey 启动 launcher intent (无需知道 activity); 无 LAUNCHER
+            # category 的 app 启不动 → fallback 到 am start 主 activity
+            out = await self.shell(
                 f"monkey -p {resolved} -c android.intent.category.LAUNCHER 1"
             )
+            lowered = (out or "").lower()
+            if "monkey aborted" in lowered or "no activities found" in lowered:
+                logger.debug(
+                    f"monkey launch failed for {resolved}, "
+                    f"falling back to am start"
+                )
+                out = await self.shell(
+                    f"am start -W -a android.intent.action.MAIN "
+                    f"-c android.intent.category.LAUNCHER -p {resolved}"
+                )
+                _check_launch_output(out, resolved)
         return self
 
     async def back(self) -> None:

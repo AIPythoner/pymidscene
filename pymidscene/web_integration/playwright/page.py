@@ -290,6 +290,21 @@ class WebPage(AbstractInterface):
         self._mouse_ever_moved = True
         await self.wait_for_navigation()
 
+    async def long_press(
+        self, x: float, y: float, duration: int = 500
+    ) -> None:
+        """
+        长按. 对应 JS base-page.ts:671-695 `longPress`:
+        duration 夹在 [300, 600]ms, mouse move → down → 等待 → up.
+        """
+        duration = max(300, min(int(duration or 500), 600))
+        logger.debug(f"Long-pressing at ({x}, {y}) for {duration}ms")
+        await self.page.mouse.move(x, y)
+        await self.page.mouse.down(button="left")
+        await asyncio.sleep(duration / 1000)
+        await self.page.mouse.up(button="left")
+        self._mouse_ever_moved = True
+
     async def hover(self, x: float, y: float) -> None:
         """
         悬停到指定坐标.

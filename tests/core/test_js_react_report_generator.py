@@ -235,3 +235,28 @@ def test_dump_payload_escapes_all_angle_brackets_like_js_escape_script_tag():
         'extracted page text with </Script > and <b>html</b> tags'
     )
     assert task["thought"] == "raw AI response may contain <script> sequences"
+
+
+def test_insight_tasks_carry_service_dump_log():
+    """Insight/Locate 任务必须带 task.log(JS ServiceDump): 查看器的元素
+    详情面板从 log.matchedElement 读数据, 不读顶层字段."""
+    dump = _extract_midscene_dump(_build_contract_report_html())
+
+    locate_task = dump["executions"][0]["tasks"][0]
+    locate_log = locate_task["log"]
+    assert locate_log["type"] == "locate"
+    assert locate_log["userQuery"]["element"] == "Locate the cart icon"
+    assert locate_log["matchedElement"][0]["center"] == [110, 25]
+    assert locate_log["matchedRect"]["width"] == 20
+    assert locate_log["taskInfo"]["durationMs"] == 250
+
+    assert_task = dump["executions"][1]["tasks"][0]
+    assert_log = assert_task["log"]
+    assert assert_log["type"] == "assert"
+    assert assert_log["userQuery"]["assertion"] == (
+        "The cart total remains visible"
+    )
+    assert assert_log["assertionPass"] is True
+
+    # markedScreenshot 无任何消费方, 不应再写入(白白膨胀报告体积)
+    assert "markedScreenshot" not in locate_task
