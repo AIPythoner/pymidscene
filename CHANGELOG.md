@@ -2,7 +2,41 @@
 
 ## [Unreleased]
 
-## [0.3.2] - 2026-06-11
+## [0.3.3] - 2026-06-11
+
+第三轮审查修复:清掉 0.3.2 审查中确认的遗留问题(架构级 + 行为发散 + 报告)。
+
+### Fixed
+
+**core:**
+
+- **AI 调用不再阻塞事件循环**:所有规划/定位/断言/查询的同步 SDK·httpx 调用(含重试 sleep)改经 `asyncio.to_thread` 在工作线程执行;此前在 async 方法里直接同步调用,多 Agent / 嵌入 web 服务时整个 loop 被挂住数十秒
+- **按意图选择模型配置**:规划走 `INTENT_PLANNING`、定位/断言/查询/ask 走 `INTENT_INSIGHT`(对齐 JS);此前全链路只用 default,`MIDSCENE_PLANNING_*` / `MIDSCENE_INSIGHT_*` 配置静默失效
+- **缓存 updateOrAppend 语义**(对齐 JS `updateOrAppendCacheRecord`):locate/plan 缓存命中但失效时,重新定位/规划的结果**原地更新**旧记录;此前只会追加,坏记录永远排在前面、`.cache.yaml` 跨运行膨胀
+- ai_act 同批动作中某个失败即中断本批进入 replan(后续动作往往依赖前一步结果),一次 ai_act 内累计失败超 5 次整体报错(对齐 JS `errorCountInOnePlanningLoop`);此前失败后继续执行同批剩余动作且无熔断
+- 规划响应连续解析失败改为抛错(对齐 JS);此前静默降级为一次 ai_click 并报告"成功"
+- ai_assert 提示词对齐 JS 的中性布尔判定;此前放宽为"屏幕任意位置可见即通过",侧边栏菜单里出现关键词也会让断言假阳性通过
+- ai_locate 的 bbox 模型适配失败按"定位失败"处理(return None);此前回退用原始值 → 抛未捕获 ValueError 或把 0-1000 归一化坐标当像素误点
+- ai_wait_for 轮询间隔扣除断言调用耗时(对齐 JS);此前实际周期 = AI 耗时 + interval,窗口内检查次数偏少易误报超时
+- 规划动作 Input 允许空字符串 value("清空输入框",对齐 JS);此前空串被当参数缺失拒绝
+- 缓存加载校验版本下限 0.16.10(对齐 JS),拒绝旧版坐标式缓存
+- 执行器新增 Navigate / Reload / GoBack 动作分支(web 走新增的 `WebPage.navigate/reload/go_back`,移动端回落 `launch`/`back`)
+
+**web (Playwright):**
+
+- **popup 处理(forceSameTabNavigation,默认开启,对齐 JS `forceClosePopup`)**:点击 `target=_blank` 链接开新 tab 时,自动关闭新 tab 并在当前 tab 打开其 URL;此前 agent 截图仍是旧 tab,后续动作全部脱靶
+- `key_press` 热键归一化(对齐 JS `normalizeKeyInputs`):接受 "ctrl + a" / "meta a" / "Ctrl+A" 等规划器输出并转成 Playwright 认可的组合键;此前直接抛 "Unknown key"
+- 默认超时对齐 JS shared/constants:navigation 10s→5s、network idle 10s→2s
+- 移除 JS 没有的 `_ensure_in_viewport` 附加行为:模型输出的本就是视口截图坐标,该函数触发时把视口坐标当文档坐标 scrollTo 反而点错;点击/悬停/拖拽现直接使用原始坐标(缓存命中路径已由 0.3.2 的 scrollIntoView 兜底)
+- 拖拽节拍对齐 JS(move→200ms→down→300ms→20 步插值→500ms→up→200ms);此前 10 步、无停顿,拖拽排序/HTML5 DnD 类页面成功率低
+
+**报告:**
+
+- `SessionRecorder` 改持有独立的报告生成器实例;此前模块级单例在多线程/多 Agent 下互相覆盖会话状态,且最后一份报告的全部 base64 截图常驻内存
+- `finish()` 幂等:重复调用(如手动 finish 后 `async with` 退出再触发)返回上次报告路径;此前每次都生成一份新报告文件
+- 保存报告不再构建两次完整 HTML(此前先 generate 后丢弃、save 内部再 generate,大报告内存峰值与 CPU 翻倍)
+- 任务时间戳使用步骤真实开始时间 + 耗时;此前全部取"报告生成时刻",timeline 视图所有任务堆叠在同一时间点
+- static 资源物化容忍并发写(已存在且大小一致跳过;写失败但文件已存在视为成功),避免多 Agent 并发 save 时 Windows 上 PermissionError
 
 第二轮审查修复:覆盖 core/web 自动化主链路与 HTML 报告生成链路(对照 JS 源的保真度 + 质量审查)。
 

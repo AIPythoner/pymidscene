@@ -37,6 +37,19 @@ def _generate_hash_id(content: str) -> str:
     return letters[:5]
 
 
+def _version_at_least(version: str, floor: tuple[int, int, int]) -> bool:
+    """宽松的语义版本比较(非数字段按 0 处理)."""
+    parts = []
+    for seg in version.split("-")[0].split(".")[:3]:
+        try:
+            parts.append(int(seg))
+        except ValueError:
+            parts.append(0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts) >= floor
+
+
 def _get_cache_max_filename_length() -> int:
     """读取 MIDSCENE_CACHE_MAX_FILENAME_LENGTH,失败回落到 200 (与 JS 对齐)."""
     raw = os.environ.get("MIDSCENE_CACHE_MAX_FILENAME_LENGTH")
@@ -317,9 +330,23 @@ class TaskCache:
             if not data:
                 return None
 
+            # 对齐 JS task-cache.ts:241-249: 低于 0.16.10 的缓存(旧版坐标式
+            # 格式)拒绝读取, 避免读入不兼容的 flow / 无 xpaths 的 locate 项.
+            file_version = str(
+                data.get("midsceneVersion", data.get("pymidsceneVersion", "0.0.0"))
+            )
+            if "beta" not in file_version and not _version_at_least(
+                file_version, (0, 16, 10)
+            ):
+                logger.warning(
+                    f"Cache file version {file_version} is below the lowest "
+                    f"supported 0.16.10, ignoring: {self.cache_file_path}"
+                )
+                return None
+
             # 转换为 CacheFileContent（兼容 JS 版本的 midsceneVersion 和旧版 pymidsceneVersion）
             cache_content = CacheFileContent(
-                midscene_version=data.get("midsceneVersion", data.get("pymidsceneVersion", "0.0.0")),
+                midscene_version=file_version,
                 cache_id=data.get("cacheId", self.cache_id),
                 caches=[]
             )

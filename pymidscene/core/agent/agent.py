@@ -36,6 +36,8 @@ from ...shared.env import (
     ModelConfig,
     get_global_model_config_manager,
     INTENT_DEFAULT,
+    INTENT_INSIGHT,
+    INTENT_PLANNING,
 )
 
 
@@ -264,6 +266,21 @@ class Agent:
         if config.model_family == 'claude':
             return self._call_with_anthropic_sdk(config, messages)
         return self._call_with_httpx(config, messages)
+
+    async def _call_ai_with_config_async(
+        self,
+        messages: list[dict[str, Any]],
+        intent: str = INTENT_DEFAULT
+    ) -> dict[str, Any]:
+        """
+        在工作线程执行同步 AI 调用, 不阻塞事件循环.
+
+        底层 SDK / httpx 客户端与重试 sleep 都是同步的, 直接在 async 方法里
+        调用会把整个 loop 挂住数秒到数十秒(多 Agent / 嵌入 web 服务时致命).
+        """
+        return await asyncio.to_thread(
+            self._call_ai_with_config, messages, intent
+        )
 
     def _call_with_anthropic_sdk(
         self,
@@ -647,9 +664,14 @@ class Agent:
             task = self.recorder.start_task("locate", param=prompt)
 
         # 检查缓存（与 JS 版本对齐：使用 XPath 定位）
+        # 命中但 XPath 失效时记住匹配项, AI 重定位成功后原地更新该记录
+        # (对齐 JS updateOrAppendCacheRecord), 而不是追加新记录让坏记录
+        # 永远排在前面、缓存文件跨运行膨胀.
+        matched_locate_cache = None
         if use_cache and self.task_cache:
             cache_result = self.task_cache.match_locate_cache(prompt)
             if cache_result:
+                matched_locate_cache = cache_result
                 logger.info(f"Cache hit for locate: '{prompt}'")
                 cache_data = cache_result.cache_content.cache
                 
@@ -749,7 +771,7 @@ class Agent:
             self.recorder.record_screenshot(screenshot_item, timing="before")
 
         # 获取模型配置
-        config = self._get_model_config(INTENT_DEFAULT)
+        config = self._get_model_config(INTENT_INSIGHT)
         model_family = config.model_family or "qwen2.5-vl"
 
         # 准备消息
@@ -761,7 +783,7 @@ class Agent:
 
         # 调用 AI
         start_time = time.time()
-        result = self._call_ai_with_config(messages, INTENT_DEFAULT)
+        result = await self._call_ai_with_config_async(messages, INTENT_INSIGHT)
         elapsed_ms = (time.time() - start_time) * 1000
 
         # 记录 AI 使用信息(含 token 细分,F1)
@@ -825,8 +847,15 @@ class Agent:
             )
             logger.debug(f"Adapted bbox: {bbox} -> {adapted_bbox} (model={model_family}, size={img_width}x{img_height})")
         except Exception as e:
-            logger.warning(f"Failed to adapt bbox: {e}, using raw values")
-            adapted_bbox = tuple(bbox) if isinstance(bbox, list) else bbox
+            # 适配失败按"定位失败"处理. 原始值要么长度不对(format_bbox
+            # 直接抛 ValueError 逃出 ai_locate), 要么是 0-1000 归一化坐标
+            # 被当像素用 → 必然点错.
+            logger.warning(f"Failed to adapt bbox {bbox}: {e}")
+            if self.recorder:
+                self.recorder.finish_task(status="failed", error=e)
+            if self.session_recorder:
+                self.session_recorder.fail_step(f"Failed to adapt bbox: {e}")
+            return None
 
         # 转换为 Rect 和中心点
         rect = format_bbox(adapted_bbox)
@@ -878,11 +907,16 @@ class Agent:
                     if single:
                         xpaths = [single]
                 if xpaths:
-                    self.task_cache.append_cache(LocateCache(
+                    new_record = LocateCache(
                         type="locate",
                         prompt=prompt,
                         cache={"xpaths": xpaths},
-                    ))
+                    )
+                    if matched_locate_cache is not None:
+                        # 命中过但 XPath 失效 → 原地更新旧记录
+                        matched_locate_cache.update_fn(new_record)
+                    else:
+                        self.task_cache.append_cache(new_record)
                     logger.debug(
                         f"Cached {len(xpaths)} XPath(s) for '{prompt}': "
                         f"{xpaths[0][:80]}..."
@@ -1215,8 +1249,8 @@ class Agent:
 
         # 调用 AI
         start_time = time.time()
-        config = self._get_model_config(INTENT_DEFAULT)
-        result = self._call_ai_with_config(messages, INTENT_DEFAULT)
+        config = self._get_model_config(INTENT_INSIGHT)
+        result = await self._call_ai_with_config_async(messages, INTENT_INSIGHT)
         elapsed_ms = (time.time() - start_time) * 1000
 
         # 记录 AI 使用信息
@@ -1304,16 +1338,12 @@ class Agent:
             screenshot_item = ScreenshotItem(screenshot_b64)
             self.recorder.record_screenshot(screenshot_item, timing="before")
 
-        # 准备消息（与 JS 版本 assert prompt 对齐）
-        # JS 版本的断言标准：只要屏幕上可见该内容即为 pass，不要求是"当前活动页面"
+        # 准备消息（与 JS tasks.ts:503-516 对齐: 中性布尔判定, 不做任何
+        # "屏幕任意位置可见即通过"的放宽 —— 那会造成系统性假阳性,
+        # 例如侧边栏菜单里出现"订单"字样就让"当前是订单页"断言通过）
         system_prompt = (
             "You are an AI assistant that verifies UI states based on screenshots.\n"
-            "Look at the screenshot carefully and determine whether the given assertion is true or false.\n"
-            "\n"
-            "IMPORTANT: The assertion passes as long as the described content is VISIBLE ANYWHERE on the screen.\n"
-            "It does NOT need to be the main/active content, the focused element, or the primary page.\n"
-            "If the text, element, or UI component mentioned in the assertion can be seen anywhere in the screenshot\n"
-            "(including sidebars, menus, headers, footers, tabs, etc.), the assertion is TRUE.\n"
+            "Look at the screenshot carefully and determine whether the following statement is true.\n"
             "\n"
             "You MUST return a valid JSON object (no markdown, no code blocks) with exactly this format:\n"
             '{"pass": true, "thought": "your reasoning"}\n'
@@ -1327,14 +1357,17 @@ class Agent:
         )
         messages = self._build_messages(
             system_prompt=system_prompt,
-            user_prompt=f"Verify this assertion about the current page: {assertion}",
+            user_prompt=(
+                "Boolean, whether the following statement is true: "
+                f"{assertion}"
+            ),
             screenshot_b64=screenshot_b64
         )
 
         # 调用 AI
         start_time = time.time()
-        config = self._get_model_config(INTENT_DEFAULT)
-        result = self._call_ai_with_config(messages, INTENT_DEFAULT)
+        config = self._get_model_config(INTENT_INSIGHT)
+        result = await self._call_ai_with_config_async(messages, INTENT_INSIGHT)
         elapsed_ms = (time.time() - start_time) * 1000
 
         # 记录 AI 使用信息
@@ -1433,7 +1466,7 @@ class Agent:
 
         # 选择规划语法:UI-TARS / auto-glm 都有各自的 Thought:/Action: 文本语法
         # 或 <think>/<answer> XML 语法,不能与通用 JSON planner 共用 prompt.
-        _planner_config = self._get_model_config(INTENT_DEFAULT)
+        _planner_config = self._get_model_config(INTENT_PLANNING)
         _use_ui_tars = _is_ui_tars_family(_planner_config.model_family)
         _use_auto_glm = is_auto_glm(_planner_config.model_family)
 
@@ -1451,9 +1484,11 @@ class Agent:
         # 对齐 JS agent.ts:901-907: UI-TARS / auto-GLM 规划产出的是
         # 截图绝对坐标, 不可跨次回放, 跳过 plan 缓存(读和写).
         _plan_cacheable = not (_use_ui_tars or _use_auto_glm)
+        matched_plan_cache = None  # 回放失败时记住匹配项, 新计划原地更新
         if use_cache and self.task_cache and _plan_cacheable:
             cache_result = self.task_cache.match_plan_cache(task_prompt)
             if cache_result:
+                matched_plan_cache = cache_result
                 cached_plan = cache_result.cache_content
                 if hasattr(cached_plan, 'yaml_workflow') and cached_plan.yaml_workflow:
                     logger.info(f"Cache hit for ai_act: '{task_prompt}'")
@@ -1501,6 +1536,7 @@ class Agent:
         else:
             max_replan_cycles = 20
         replan_count = 0
+        action_error_count = 0  # 对齐 JS errorCountInOnePlanningLoop(上限 5)
         conversation_history: List[str] = []
         all_executed_actions: List[Dict[str, Any]] = []  # 收集所有执行的动作，用于缓存
 
@@ -1541,8 +1577,10 @@ class Agent:
                     )
 
                 start_time = time.time()
-                config = self._get_model_config(INTENT_DEFAULT)
-                result = self._call_ai_with_config(messages, INTENT_DEFAULT)
+                config = self._get_model_config(INTENT_PLANNING)
+                result = await self._call_ai_with_config_async(
+                    messages, INTENT_PLANNING
+                )
                 elapsed_ms = (time.time() - start_time) * 1000
 
                 logger.info(
@@ -1582,22 +1620,16 @@ class Agent:
                 except Exception as e:
                     logger.error(f"Failed to parse planning response: {e}")
                     logger.debug(f"Raw response: {result['content'][:500]}")
-                    # 解析失败时尝试回退：作为单步 click 处理
                     conversation_history.append(f"Planning parse error: {e}")
+                    # 对齐 JS tasks.ts:369: 规划响应反复解析失败直接报错.
+                    # 旧版降级为 ai_click 会把任意 act 任务变成一次不可预测
+                    # 的点击并报告"成功".
                     if replan_count >= 2:
-                        # 如果连续解析失败，回退到 ai_click
-                        logger.info(f"Falling back to ai_click for: '{task_prompt}'")
-                        click_result = await self.ai_click(task_prompt)
-                        if self.recorder:
-                            self.recorder.finish_task(
-                                status="finished" if click_result else "failed"
-                            )
-                        if self.session_recorder:
-                            if click_result:
-                                self.session_recorder.complete_step("success (fallback)")
-                            else:
-                                self.session_recorder.fail_step("fallback click failed")
-                        return click_result
+                        raise RuntimeError(
+                            f"Failed to parse AI planning response for "
+                            f"'{task_prompt}' after {replan_count + 1} "
+                            f"attempts: {e}"
+                        ) from e
                     replan_count += 1
                     continue
 
@@ -1628,7 +1660,11 @@ class Agent:
                     replan_count += 1
                     continue
 
-                # 4. 执行每个规划的动作
+                # 4. 执行每个规划的动作 —— 对齐 JS tasks.ts:423-439:
+                # 同批中某个动作失败即中断本批(后续动作往往依赖前一步的
+                # 结果, 基于失败状态继续执行会把页面打乱), 错误进入 replan;
+                # 一次 ai_act 内累计失败超过 5 次(JS errorCountInOnePlanningLoop)
+                # 整体报错.
                 for action in actions:
                     action_type = action.get("type", "")
                     param = action.get("param", {})
@@ -1655,6 +1691,15 @@ class Agent:
                         conversation_history.append(
                             f"Action failed: {action_type} ({thought}) - will retry on next replan"
                         )
+                        action_error_count += 1
+                        if action_error_count > 5:
+                            raise RuntimeError(
+                                f"Too many action failures "
+                                f"({action_error_count}) while executing "
+                                f"'{task_prompt}'"
+                            )
+                        should_continue = True  # 失败后必须 replan
+                        break
 
                 # 5. 检查是否需要继续规划
                 if not should_continue:
@@ -1690,11 +1735,17 @@ class Agent:
                 yaml_workflow = self._actions_to_yaml_workflow(
                     all_executed_actions, task_prompt
                 )
-                self.task_cache.append_cache(PlanningCache(
+                new_plan_record = PlanningCache(
                     type="plan",
                     prompt=task_prompt,
                     yaml_workflow=yaml_workflow
-                ))
+                )
+                if matched_plan_cache is not None:
+                    # 命中过但回放失败 → 原地更新旧记录
+                    # (对齐 JS updateOrAppendCacheRecord)
+                    matched_plan_cache.update_fn(new_plan_record)
+                else:
+                    self.task_cache.append_cache(new_plan_record)
                 logger.info(
                     f"Cached plan for '{task_prompt}': "
                     f"{len(all_executed_actions)} actions"
@@ -1890,8 +1941,8 @@ class Agent:
         )
 
         start_t = time.time()
-        config = self._get_model_config(INTENT_DEFAULT)
-        result = self._call_ai_with_config(messages, INTENT_DEFAULT)
+        config = self._get_model_config(INTENT_INSIGHT)
+        result = await self._call_ai_with_config_async(messages, INTENT_INSIGHT)
         elapsed_ms = (time.time() - start_t) * 1000
         logger.info(f"ai_ask completed: {elapsed_ms:.0f}ms")
 
@@ -2239,8 +2290,10 @@ class Agent:
 
             elif action_upper in ("Input", "input", "Type", "type"):
                 center = _extract_center(param)
-                value = param.get("value", param.get("text", ""))
-                if not value:
+                value = param.get("value", param.get("text", None))
+                # 对齐 JS agent.ts:722-725: 空字符串是合法输入("清空输入框"),
+                # 只有完全没给 value 才算参数缺失
+                if value is None:
                     logger.warning("Input action missing value")
                     return False
                 if center is not None:
@@ -2341,6 +2394,40 @@ class Agent:
                     return True
                 return False
 
+            elif action_upper in ("Navigate", "navigate", "OpenUrl", "GoToUrl"):
+                url = param.get("url", param.get("uri", "")) or ""
+                if not url:
+                    logger.warning("Navigate action missing url")
+                    return False
+                if hasattr(self.interface, "navigate"):
+                    await self.interface.navigate(url)
+                    return True
+                if hasattr(self.interface, "launch"):
+                    # Android/iOS: URL 经 launch 通道打开
+                    await self.interface.launch(url)
+                    return True
+                logger.warning("Interface does not support navigation")
+                return False
+
+            elif action_upper in ("Reload", "reload", "Refresh", "refresh"):
+                if hasattr(self.interface, "reload"):
+                    await self.interface.reload()
+                    return True
+                logger.warning("Interface does not support reload")
+                return False
+
+            elif action_upper in ("GoBack", "goBack", "Back", "back"):
+                if hasattr(self.interface, "go_back"):
+                    await self.interface.go_back()
+                    return True
+                if hasattr(self.interface, "back"):
+                    # AndroidDevice.back() = BACK 键
+                    await self.interface.back()
+                    return True
+                await self.interface.evaluate_javascript("window.history.back()")
+                await asyncio.sleep(0.3)
+                return True
+
             else:
                 logger.warning(f"Unknown action type: {action_type}")
                 return False
@@ -2406,6 +2493,7 @@ class Agent:
             if remaining <= 0:
                 break
 
+            check_start = time.time()
             try:
                 # keep_raw_response:断言失败不抛 —— 只有 AI 调用真正出错才抛
                 result = await self.ai_assert(assertion, keep_raw_response=True)
@@ -2423,8 +2511,16 @@ class Agent:
             if isinstance(result, dict):
                 last_thought = result.get("thought") or last_thought
 
-            # 条件未达成 —— 等 interval 或剩余时间(取较小者)后重试
-            await asyncio.sleep(min(interval_sec, max(remaining, 0)))
+            # 条件未达成 —— 对齐 JS tasks.ts:697-710: 间隔扣除本次断言耗时
+            # (单次 AI 调用 2-3s 时不再叠加完整 interval, 否则 15s 窗口内的
+            # 检查次数明显少于 JS, 更易误报超时); 检查比 interval 还慢则
+            # 立即进入下一轮.
+            elapsed = time.time() - check_start
+            sleep_for = max(0.0, interval_sec - elapsed)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(sleep_for, remaining))
 
         error_msg = (
             f"WaitFor timeout ({timeout_ms}ms): {assertion}. "

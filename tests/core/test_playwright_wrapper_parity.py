@@ -11,6 +11,11 @@ class _FakeAsyncPage:
     def __init__(self) -> None:
         self.wait_for_selector_calls: list[dict[str, Any]] = []
         self.wait_for_load_state_calls: list[dict[str, Any]] = []
+        self.event_handlers: list[tuple[str, Any]] = []
+
+    def on(self, event: str, handler: Any) -> None:
+        # WebPage 默认注册 popup 处理器(force_same_tab_navigation)
+        self.event_handlers.append((event, handler))
 
     async def wait_for_selector(self, selector: str, timeout: int) -> None:
         self.wait_for_selector_calls.append({"selector": selector, "timeout": timeout})

@@ -56,7 +56,17 @@ def _materialize_traversable_tree(source: Any, destination: Path) -> None:
         return
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(source.read_bytes())
+    # 多个 Agent 并发 save() 会同时物化同一批 static 资源; Windows 上并发
+    # 写同名文件会 PermissionError. 内容来自同一打包资源, 已存在且大小一致
+    # 即可跳过, 写失败时若文件已存在也视为成功(别的写入者赢了).
+    data = source.read_bytes()
+    try:
+        if destination.exists() and destination.stat().st_size == len(data):
+            return
+        destination.write_bytes(data)
+    except OSError:
+        if not destination.exists():
+            raise
 
 
 def materialize_report_template_static_assets(output_dir: str | Path) -> None:

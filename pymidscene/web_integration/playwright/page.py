@@ -4,9 +4,10 @@ Playwright 页面适配器 - 对应 packages/web-integration/src/playwright/page
 将 Playwright Page 适配为 PyMidscene 的统一接口。
 """
 
-from typing import Optional, Any, List, Tuple
+from typing import Optional, Any, List
 import base64
 import asyncio
+import re
 import sys
 
 from playwright.async_api import Page as PlaywrightPage
@@ -20,15 +21,16 @@ from ...shared.logger import logger
 class WebPage(AbstractInterface):
     """Playwright 页面适配器"""
 
-    # 默认配置
-    DEFAULT_WAIT_FOR_NAVIGATION_TIMEOUT = 10000  # 10 秒
-    DEFAULT_WAIT_FOR_NETWORK_IDLE_TIMEOUT = 10000  # 10 秒
+    # 默认配置(对齐 JS shared/constants: 5000ms / 2000ms)
+    DEFAULT_WAIT_FOR_NAVIGATION_TIMEOUT = 5000
+    DEFAULT_WAIT_FOR_NETWORK_IDLE_TIMEOUT = 2000
 
     def __init__(
         self,
         page: PlaywrightPage,
         wait_for_navigation_timeout: Optional[int] = None,
         wait_for_network_idle_timeout: Optional[int] = None,
+        force_same_tab_navigation: bool = True,
     ):
         """
         初始化 Playwright 页面适配器
@@ -55,11 +57,57 @@ class WebPage(AbstractInterface):
         # (hover 某容器后滚动应滚那个容器).
         self._mouse_ever_moved = False
 
+        # 对齐 JS forceClosePopup(base-page.ts:781-812, 默认开启):
+        # target=_blank 的点击会开新 tab, agent 的截图仍是旧 tab → 后续
+        # 动作全部脱靶. 关闭新 tab 并在当前 tab 打开其 URL.
+        if force_same_tab_navigation:
+            self.page.on("popup", self._on_popup_force_same_tab)
+
         logger.debug(
             f"WebPage initialized: "
             f"nav_timeout={self.wait_for_navigation_timeout}ms, "
             f"idle_timeout={self.wait_for_network_idle_timeout}ms"
         )
+
+    async def _on_popup_force_same_tab(self, popup: PlaywrightPage) -> None:
+        """popup 事件处理: 关掉新 tab, 当前 tab goto 它的 URL."""
+        try:
+            # Playwright 的 popup 初始常是 about:blank, 等导航提交后再取 URL
+            try:
+                await popup.wait_for_load_state(
+                    "domcontentloaded", timeout=5000
+                )
+            except Exception:
+                pass
+            url = popup.url
+            logger.info(f"Popup opened: {url}, forcing same-tab navigation")
+            if not popup.is_closed():
+                try:
+                    await popup.close()
+                except Exception as exc:
+                    logger.debug(f"Failed to close popup {url}: {exc}")
+            if url and url != "about:blank" and not self.page.is_closed():
+                try:
+                    await self.page.goto(url)
+                except Exception as exc:
+                    logger.debug(f"Failed to goto {url}: {exc}")
+        except Exception as exc:  # 事件回调不允许向外抛
+            logger.warning(f"force_same_tab_navigation handler failed: {exc}")
+
+    async def navigate(self, url: str) -> None:
+        """对应 JS base-page.ts `navigate`."""
+        await self.page.goto(url)
+        await self.wait_for_navigation()
+
+    async def reload(self) -> None:
+        """对应 JS `reload`."""
+        await self.page.reload()
+        await self.wait_for_navigation()
+
+    async def go_back(self) -> None:
+        """对应 JS `goBack`."""
+        await self.page.go_back()
+        await self.wait_for_navigation()
 
     async def get_ui_context(self) -> UIContext:
         """获取当前 UI 上下文"""
@@ -132,41 +180,6 @@ class WebPage(AbstractInterface):
         logger.debug(f"Screenshot taken: size={len(screenshot_base64)} chars (jpeg)")
         return screenshot_base64
 
-    async def _ensure_in_viewport(self, x: float, y: float) -> Tuple[float, float]:
-        """
-        如果 (x, y) 已在视口内则直接返回;否则做一次粗滚动把 y 居中,
-        然后返回调整后的 (x, y_in_viewport).
-
-        **不做 `elementFromPoint` → `getBoundingClientRect` 的"重取中心"**:
-        agent 层已经通过 XPath 预先 `scrollIntoView({block:'center'})` 并
-        刷新过 element.center;在这里再根据 `elementFromPoint` 重新定位
-        可能命中覆盖的 wrapper/overlay,偏离 AI 实际看到的像素点.
-        """
-        adjusted = await self.page.evaluate(
-            """
-            (coords) => {
-                const { x, y } = coords;
-                const inViewport = (
-                    x >= 0 && x <= window.innerWidth &&
-                    y >= 0 && y <= window.innerHeight
-                );
-                if (inViewport) {
-                    return { x, y, scrolled: false };
-                }
-                // 元素完全在视口外 —— 粗滚动把 y 居中再点
-                window.scrollTo({
-                    top: Math.max(0, y - window.innerHeight / 2),
-                    behavior: 'instant'
-                });
-                return { x, y: y - window.scrollY, scrolled: true };
-            }
-            """,
-            {"x": x, "y": y},
-        )
-        if adjusted and adjusted.get("scrolled"):
-            await asyncio.sleep(0.15)
-        return (adjusted["x"], adjusted["y"]) if adjusted else (x, y)
-
     async def click(self, x: float, y: float) -> None:
         """
         点击指定坐标.
@@ -177,8 +190,9 @@ class WebPage(AbstractInterface):
         """
         logger.debug(f"Clicking at ({x}, {y})")
 
-        click_x, click_y = await self._ensure_in_viewport(x, y)
-        await self.page.mouse.click(click_x, click_y)
+        # 对齐 JS base-page.ts:368-396: 模型输出的就是视口截图坐标,
+        # 直接点击, 不做任何"视口外滚动修正"(那会把视口坐标当文档坐标用).
+        await self.page.mouse.click(x, y)
         self._mouse_ever_moved = True
 
         # 等待可能的导航
@@ -206,8 +220,8 @@ class WebPage(AbstractInterface):
 
         # 如果提供了坐标,聚焦到该点(agent 层已经 scrollIntoView,这里只做视口兜底)
         if x is not None and y is not None:
-            click_x, click_y = await self._ensure_in_viewport(x, y)
-            await self.page.mouse.click(click_x, click_y)
+            await self.page.mouse.click(x, y)
+            self._mouse_ever_moved = True
             await asyncio.sleep(0.1)
 
         # 清空输入框内容(跨平台: mac 使用 Meta+A,其他平台 Ctrl+A —— 与 JS base-page.ts:481-504 对齐)
@@ -234,8 +248,8 @@ class WebPage(AbstractInterface):
         双击坐标。对应 JS base-page.ts `leftDoubleClick`。
         """
         logger.debug(f"Double-clicking at ({x}, {y})")
-        cx, cy = await self._ensure_in_viewport(x, y)
-        await self.page.mouse.dblclick(cx, cy)
+        await self.page.mouse.dblclick(x, y)
+        self._mouse_ever_moved = True
         await self.wait_for_navigation()
 
     async def right_click(self, x: float, y: float) -> None:
@@ -243,8 +257,8 @@ class WebPage(AbstractInterface):
         右键点击坐标。对应 JS base-page.ts `rightClick`。
         """
         logger.debug(f"Right-clicking at ({x}, {y})")
-        cx, cy = await self._ensure_in_viewport(x, y)
-        await self.page.mouse.click(cx, cy, button="right")
+        await self.page.mouse.click(x, y, button="right")
+        self._mouse_ever_moved = True
 
     async def drag_and_drop(
         self,
@@ -258,18 +272,21 @@ class WebPage(AbstractInterface):
         Playwright 原生无单步 drag-and-drop API,用 mouse.move → down → move → up 组合。
         """
         logger.debug(f"Drag from ({from_x}, {from_y}) to ({to_x}, {to_y})")
-        fx, fy = await self._ensure_in_viewport(from_x, from_y)
-        tx, ty = await self._ensure_in_viewport(to_x, to_y)
-        await self.page.mouse.move(fx, fy)
+        # 节拍对齐 JS base-page.ts:416-439: move → 200ms → down → 300ms →
+        # 20 步插值 move → 500ms → up → 200ms. 拖拽排序/HTML5 DnD 等页面
+        # 依赖这些事件间隔.
+        await self.page.mouse.move(from_x, from_y)
+        await asyncio.sleep(0.2)
         await self.page.mouse.down()
-        # 分段 move 让浏览器 dispatch dragover 事件
-        steps = 10
+        await asyncio.sleep(0.3)
+        steps = 20
         for i in range(1, steps + 1):
-            ix = fx + (tx - fx) * (i / steps)
-            iy = fy + (ty - fy) * (i / steps)
+            ix = from_x + (to_x - from_x) * (i / steps)
+            iy = from_y + (to_y - from_y) * (i / steps)
             await self.page.mouse.move(ix, iy)
-            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.5)
         await self.page.mouse.up()
+        await asyncio.sleep(0.2)
         self._mouse_ever_moved = True
         await self.wait_for_navigation()
 
@@ -283,8 +300,7 @@ class WebPage(AbstractInterface):
         """
         logger.debug(f"Hovering at ({x}, {y})")
 
-        hover_x, hover_y = await self._ensure_in_viewport(x, y)
-        await self.page.mouse.move(hover_x, hover_y)
+        await self.page.mouse.move(x, y)
         self._mouse_ever_moved = True
 
     async def scroll(
@@ -405,16 +421,76 @@ class WebPage(AbstractInterface):
         )
         await self.page.mouse.wheel(9999999, 0)
 
+    # 规划器常见的键名写法 → Playwright 认可的键名
+    _KEY_NAME_MAP = {
+        "ctrl": "Control",
+        "control": "Control",
+        "cmd": "Meta",
+        "command": "Meta",
+        "meta": "Meta",
+        "win": "Meta",
+        "alt": "Alt",
+        "option": "Alt",
+        "shift": "Shift",
+        "esc": "Escape",
+        "escape": "Escape",
+        "enter": "Enter",
+        "return": "Enter",
+        "backspace": "Backspace",
+        "delete": "Delete",
+        "del": "Delete",
+        "tab": "Tab",
+        "space": "Space",
+        "spacebar": "Space",
+        "up": "ArrowUp",
+        "down": "ArrowDown",
+        "left": "ArrowLeft",
+        "right": "ArrowRight",
+        "arrowup": "ArrowUp",
+        "arrowdown": "ArrowDown",
+        "arrowleft": "ArrowLeft",
+        "arrowright": "ArrowRight",
+        "pageup": "PageUp",
+        "pagedown": "PageDown",
+        "home": "Home",
+        "end": "End",
+        "insert": "Insert",
+    }
+
+    @classmethod
+    def _normalize_key(cls, key: str) -> str:
+        """
+        对齐 JS web-page.ts `normalizeKeyInputs`/`transformHotkeyInput`:
+        接受 "ctrl + a"、"meta a"、"Ctrl+A" 等规划器输出, 转成 Playwright
+        认可的 "Control+a" 组合键格式; 否则 Ctrl+A 全选这类 keyName 会
+        直接抛 "Unknown key".
+        """
+        parts = [p for p in re.split(r"[+\s]+", key.strip()) if p]
+        if not parts:
+            return key
+        normalized = []
+        for part in parts:
+            lower = part.lower()
+            if lower in cls._KEY_NAME_MAP:
+                normalized.append(cls._KEY_NAME_MAP[lower])
+            elif len(part) == 1:
+                # 组合键中的字母小写(Playwright 习惯), 单键保持原样
+                normalized.append(part.lower() if len(parts) > 1 else part)
+            else:
+                normalized.append(part[0].upper() + part[1:])
+        return "+".join(normalized)
+
     async def key_press(self, key: str) -> None:
         """
         按键
 
         Args:
-            key: 按键名称（Enter、Escape 等）
+            key: 按键名称（Enter、Escape、"Ctrl+A" 等组合键）
         """
-        logger.debug(f"Pressing key: {key}")
+        normalized = self._normalize_key(key)
+        logger.debug(f"Pressing key: {key} -> {normalized}")
 
-        await self.page.keyboard.press(key)
+        await self.page.keyboard.press(normalized)
 
         # 等待可能的导航（如按 Enter 提交表单）
         await self.wait_for_navigation()

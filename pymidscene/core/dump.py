@@ -32,10 +32,7 @@ from .report_generator import (
     ReportStep,
     get_default_report_generator,
 )
-from .js_react_report_generator import (
-    JSReactReportGenerator,
-    get_js_react_report_generator,
-)
+from .js_react_report_generator import JSReactReportGenerator
 from ..shared.logger import logger
 from ..shared.types import LocateResultElement
 
@@ -253,10 +250,13 @@ class SessionRecorder:
         self.element_marker = get_default_marker()
         self.report_generator = get_default_report_generator()
         
-        # JS React 报告生成器（当 use_js_react_report=True 时使用）
+        # JS React 报告生成器（当 use_js_react_report=True 时使用）.
+        # 每个 SessionRecorder 持有独立实例: 模块级单例在多线程/多 Agent
+        # 下会互相覆盖会话状态, 且让最后一份报告的全部截图常驻内存.
+        # (模板缓存是类级别的, 独立实例不增加加载开销.)
         self.js_react_generator: Optional[JSReactReportGenerator] = None
         if use_js_react_report:
-            self.js_react_generator = get_js_react_report_generator()
+            self.js_react_generator = JSReactReportGenerator()
 
         # 会话数据
         self.start_time = datetime.now()
@@ -270,6 +270,11 @@ class SessionRecorder:
         self.page_url: Optional[str] = None
         self.page_title: Optional[str] = None
         self.viewport_size: Optional[Dict[str, int]] = None
+
+        # finish() 幂等控制: 报告文件名含随机 uuid, 重复 finish(如手动调用
+        # 后 __aexit__ 再调)不该产出第二份报告
+        self._finished = False
+        self._last_report_path: str | None = None
 
         logger.info(f"SessionRecorder initialized: {self.session_id}")
 
@@ -548,6 +553,12 @@ class SessionRecorder:
     
     def _generate_js_react_report(self) -> str:
         """使用 JS React 报告生成器生成报告"""
+        self._populate_js_react_dump()
+        assert self.js_react_generator is not None
+        return self.js_react_generator.generate_html()
+
+    def _populate_js_react_dump(self) -> None:
+        """把 steps 填入 JS React 生成器(只构建 dump 数据, 不渲染 HTML)"""
         if not self.js_react_generator:
             raise RuntimeError("JS React generator not initialized")
         
@@ -602,6 +613,15 @@ class SessionRecorder:
                 if meta:
                     group_name = meta.get("name")
 
+            # 任务结束时刻 = 步骤真实开始时间 + 耗时(timeline 视图依赖
+            # timing.start/end 排布, 用"报告生成时刻"会让所有 bar 堆叠)
+            try:
+                step_ts: int | None = int(
+                    datetime.fromisoformat(step.timestamp).timestamp() * 1000
+                ) + (step.duration_ms or 0)
+            except (TypeError, ValueError):
+                step_ts = None
+
             # 添加任务 —— 全字段透传(F1+F2+F4)
             self.js_react_generator.add_task(
                 task_type=task_type,
@@ -625,10 +645,9 @@ class SessionRecorder:
                 group_name=group_name,  # F4
                 error=step.error_message,
                 thought=step.ai_reasoning,
+                ts=step_ts,
             )
         
-        return self.js_react_generator.generate_html()
-
     def save_report(self, filename: Optional[str] = None) -> str:
         """
         保存 HTML 报告到文件
@@ -659,11 +678,11 @@ class SessionRecorder:
     
     def _save_js_react_report(self, filename: Optional[str] = None) -> str:
         """使用 JS React 报告生成器保存报告"""
-        # 先生成报告内容（会初始化会话和添加任务）
-        self._generate_js_react_report()
-        
-        if not self.js_react_generator:
-            raise RuntimeError("JS React generator not initialized")
+        # 只构建 dump 数据; HTML 渲染由 generator.save() 内部做一次
+        # (此前这里先 generate_html 再 save 又 generate 一遍, 大报告的
+        # 内存峰值与 CPU 翻倍)
+        self._populate_js_react_dump()
+        assert self.js_react_generator is not None
         
         # 保存报告
         return self.js_react_generator.save(
@@ -690,11 +709,14 @@ class SessionRecorder:
 
     def finish(self) -> Optional[str]:
         """
-        结束会话并保存报告
+        结束会话并保存报告. 幂等: 重复调用返回上次的报告路径.
 
         Returns:
             报告文件路径（如果 auto_save=True）
         """
+        if self._finished:
+            return self._last_report_path
+
         self.end_time = datetime.now()
 
         logger.info(
@@ -703,8 +725,10 @@ class SessionRecorder:
             f"duration={(self.end_time - self.start_time).total_seconds():.1f}s"
         )
 
+        self._finished = True
         if self.auto_save:
-            return self.save_report()
+            self._last_report_path = self.save_report()
+            return self._last_report_path
 
         return None
 

@@ -404,6 +404,9 @@ class JSReactReportGenerator:
         # --- F4: 执行分组;同一 group_key 的任务合并到同一个 execution ---
         group_key: Optional[str] = None,
         group_name: Optional[str] = None,
+        # 任务结束时刻(epoch 毫秒). 不传则取"报告生成时刻" —— 那会让
+        # timeline 上所有任务堆叠在同一时间点, 调用方应尽量传真实时间.
+        ts: int | None = None,
     ):
         """
         添加执行任务
@@ -433,7 +436,8 @@ class JSReactReportGenerator:
         
         # 构建截图记录 - 与 JS 版本格式一致
         recorder = []
-        ts = int(time.time() * 1000)
+        if ts is None:
+            ts = int(time.time() * 1000)
         
         # 确保截图有正确的 data:image 前缀
         def ensure_data_url(screenshot: str) -> str:
