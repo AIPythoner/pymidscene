@@ -2,7 +2,46 @@
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-06-11
+## [0.3.2] - 2026-06-11
+
+第二轮审查修复:覆盖 core/web 自动化主链路与 HTML 报告生成链路(对照 JS 源的保真度 + 质量审查)。
+
+### Fixed
+
+**core / 缓存互通(与 JS 版缓存互通是硬性要求):**
+
+- **plan 缓存改写为 JS 兼容的 `MidsceneYamlScript` 格式**(`{tasks:[{name, flow:[{aiTap: '', locate: ...}]}]}`,对齐 agent.ts:948-957 + buildYamlFlowFromPlans);此前写入裸列表,JS 读不了。读取侧同时兼容旧版 Python 裸列表格式
+- **读到无法解析的缓存(如 JS 写入的)不再把 ai_act 判为失败** —— 回放失败(解析不了/动作失败)一律回退 AI 规划;此前直接 `return False`,命中一条 JS 格式缓存就让任务挂掉
+- **缓存文件名与 JS 完全对齐**:非法字符清洗照搬 `replaceIllegalPathCharsAndSpace`(`[:*?"<>|# ]` → `-`);超长名 hash 逐位复刻 `generateHashId`(sha256 hex → a-z 映射取前 5 位);此前同一 cache_id 在两种语言下生成不同文件名,互通等于没有
+- **write-only 缓存模式每次 flush 指数级重复记录** —— 已落盘的增量现在会从内存清掉
+- locate 缓存命中后先把元素 scrollIntoView 再取 rect/center(对齐 JS `getElementInfoByXpath`);此前元素在视口外时 bounding_box 的视口相对坐标会换算错位、点错元素
+- UI-TARS / auto-GLM 跳过 plan 缓存读写(对齐 agent.ts:901-907):它们产出的是截图绝对坐标,不可跨次回放
+
+**core / ai_act 失败路径(消除"假成功"):**
+
+- 超过重规划上限改为抛 RuntimeError;此前返回 True 且把执行到一半的动作序列固化进缓存
+- 重规划上限对齐 JS:默认 20、UI-TARS 40、auto-GLM 100,支持 `MIDSCENE_REPLANNING_CYCLE_LIMIT` 环境变量;此前硬编码 10 且无配置出口
+- 空动作 + `shouldContinuePlanning=false` 视为正常完成(对齐 JS);此前"有弹窗就关掉"这类条件任务在无弹窗时会多烧 2 次规划后抛错
+
+**web / 滚动与等待:**
+
+- `PlaywrightAgent.ai_wait_for(timeout=30)`(秒)此前按位置参数传给 core 的毫秒参数,实际只等 30ms
+- `PlaywrightPage` 新增 `scroll_until_top/bottom/left/right`(mouse.wheel ±9999999 + 起点语义,对齐 base-page.ts:521-539):能滚动指针下方的内部滚动容器,且保留 AI 定位的起始元素;此前 web 的 scrollTo* 走 `window.scrollTo` 只能滚主文档、丢弃定位起点
+- 规划执行器的 Scroll 动作:`untilLeft/untilRight` 现路由到 `scroll_until_left/right`(此前被降级为"向下滚一次");locate 到的元素中心作为滚动起点传入(此前完全忽略);未指定距离时用 interface 默认值(web 视口 70%,对齐 JS),此前硬编码 500px
+- 滚动前的鼠标定位实现 JS `everMoved` 语义:只有鼠标从未移动过才移到视口中心,hover 某容器后滚动现在滚的是那个容器
+
+**HTML 报告(与打包的 JS 查看器的格式契约):**
+
+- **script 注入转义对齐 JS `escapeScriptTag`**:所有 `<`/`>` → `__midscene_lt__`/`__midscene_gt__`(查看器解析前无条件还原)。此前只替换字面量 `</script>`,dump 中出现 `</Script >` 等变体或 `<` 序列会把整页打碎;且查看器的无条件 unescape 与 Python 的不转义不对称,可能悄悄损坏数据
+- **task status 归一化为 finished/failed/pending**:"success (cached)" 等带注记状态此前落入 pending,JS 查看器把这类步骤渲染成"未完成"并注入 "unknown error" 回放帧;缓存来源改经 hitBy 表达
+- **hitBy 结构对齐 JS `{from: 'Cache', context: {...}}`**(前端精确匹配大写 'Cache');此前扁平小写结构导致 cache 徽标永不显示
+- **subType 用显式映射表替代 capitalize()**:`rightClick→RightClick`、`keyboardPress→KeyboardPress`、`waitFor→WaitFor` 等;此前 "Rightclick"/"Waitfor" 与前端精确匹配不符,丢图标和回放指针动效;hover/rightClick/doubleClick/keyboardPress 等正确归入 Action Space
+- Assert/Query 任务的 param 字段名对齐 `extractInsightParam`(`param.assertion`/`param.dataDemand`);此前 Insight 行 subtitle 空白
+- 模型名/耗时写入 `task.usage.model_name`/`time_cost`(前端实际读取位置),`modelBriefs` 从步骤实际用到的模型收集;此前报告里模型显示 Unknown
+
+### Chore
+
+- 删除报告生成器中无消费方的顶层字段依赖说明;测试 `_extract_midscene_dump` 同步 unescape;新增全量转义回归测试
 
 本次为 Android / iOS 移植的审查修复版:对照 JS 源做了一轮移植保真度 + 代码质量审查,修掉一批"静默失效"类 bug。
 

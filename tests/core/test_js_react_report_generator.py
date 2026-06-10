@@ -5,7 +5,10 @@ import re
 from importlib import resources
 from pathlib import Path
 
-from pymidscene.core.js_react_report_generator import JSReactReportGenerator
+from pymidscene.core.js_react_report_generator import (
+    JSReactReportGenerator,
+    _anti_escape_script_tag,
+)
 
 REPORT_TEMPLATE_PACKAGE = "pymidscene.resources.report_template"
 PNG_BASE64 = (
@@ -67,7 +70,9 @@ def _extract_midscene_dump(html: str) -> dict:
         )
     )
     assert matches, "Generated HTML should embed a midscene_web_dump payload."
-    return json.loads(matches[-1].group(1))
+    # 注入内容经 escapeScriptTag(< / > → marker)转义, 读回需对称还原 ——
+    # 与打包查看器 App.tsx 的 antiEscapeScriptTag 行为一致
+    return json.loads(_anti_escape_script_tag(matches[-1].group(1)))
 
 
 def _vendored_template_html() -> str:
@@ -113,6 +118,7 @@ def test_generator_dump_matches_vendored_template_compatibility_checklist():
         "prompt_tokens": 11,
         "completion_tokens": 7,
         "total_tokens": 18,
+        "time_cost": 250.0,
     }
 
     assert_task = dump["executions"][1]["tasks"][0]
@@ -191,3 +197,41 @@ def test_generate_html_prefers_vendored_template_and_emits_single_dump_script_ta
         "generate_html() should keep using the packaged report_template resources "
         "instead of the fallback warning page."
     )
+
+
+def test_dump_payload_escapes_all_angle_brackets_like_js_escape_script_tag():
+    """
+    对齐 JS shared/utils.ts escapeScriptTag: 注入的 dump 中所有 < / > 都被
+    替换为 __midscene_lt__ / __midscene_gt__。打包查看器在解析前无条件
+    执行 antiEscapeScriptTag 还原, 两边必须严格对称; 只转义字面量
+    "</script>" 时, "</Script >" 等大小写/空白变体仍会提前终止 script
+    元素并把整页打碎。
+    """
+    generator = JSReactReportGenerator()
+    generator.start_session(group_name="escape", description="d")
+    generator.add_task(
+        task_type="Insight",
+        sub_type="Query",
+        prompt='extracted page text with </Script > and <b>html</b> tags',
+        thought="raw AI response may contain <script> sequences",
+    )
+    html = generator.generate_html()
+
+    script_match = re.search(
+        r'<script type="midscene_web_dump">\s*(.*?)\s*</script>',
+        html,
+        re.DOTALL,
+    )
+    assert script_match is not None
+    payload = script_match.group(1)
+    # script 体内不允许出现任何裸 < / >(否则可能终止 script 元素)
+    assert "<" not in payload and ">" not in payload
+    assert "__midscene_lt__" in payload
+
+    # 还原后 JSON 完整且内容无损
+    dump = json.loads(_anti_escape_script_tag(payload))
+    task = dump["executions"][0]["tasks"][0]
+    assert task["param"]["dataDemand"] == (
+        'extracted page text with </Script > and <b>html</b> tags'
+    )
+    assert task["thought"] == "raw AI response may contain <script> sequences"

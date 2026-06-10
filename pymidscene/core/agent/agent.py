@@ -6,6 +6,7 @@ Agent 核心类 - 对应 packages/core/src/agent/agent.ts
 
 from typing import Optional, Dict, Any, List, Union, Tuple
 import inspect
+import os
 import time
 import asyncio
 
@@ -667,6 +668,30 @@ class Agent:
                                 break
                         if xpath:
                             logger.info(f"Using cached XPath: {xpath[:80]}...")
+                            # 对齐 JS locator.ts `getElementInfoByXpath`:
+                            # 元素可能在视口外 —— 先 scrollIntoView 再取
+                            # rect/center。web 的 bounding_box 是视口相对坐标,
+                            # 页面已滚动时直接使用会换算错位、点到错误元素。
+                            scroll_fn = getattr(
+                                self.interface,
+                                "scroll_element_by_xpath_into_view",
+                                None,
+                            )
+                            if callable(scroll_fn):
+                                try:
+                                    await scroll_fn(xpath)
+                                    refreshed = (
+                                        await self.interface.get_element_by_xpath(
+                                            xpath
+                                        )
+                                    )
+                                    if refreshed:
+                                        element_info = refreshed
+                                except Exception as exc:
+                                    logger.debug(
+                                        f"Scroll-into-view after cache hit "
+                                        f"failed: {exc}"
+                                    )
                         if element_info:
                             rect = element_info["rect"]
                             center = element_info["center"]
@@ -1423,7 +1448,10 @@ class Agent:
         # JS 版本: agent.ts aiAct 中的 cache 逻辑.
         # 对齐 JS `loadYamlFlowAsPlanning` —— 命中后先把"用的是 cached plan"
         # 写进报告,然后逐动作回放并记录 per-action 步骤.
-        if use_cache and self.task_cache:
+        # 对齐 JS agent.ts:901-907: UI-TARS / auto-GLM 规划产出的是
+        # 截图绝对坐标, 不可跨次回放, 跳过 plan 缓存(读和写).
+        _plan_cacheable = not (_use_ui_tars or _use_auto_glm)
+        if use_cache and self.task_cache and _plan_cacheable:
             cache_result = self.task_cache.match_plan_cache(task_prompt)
             if cache_result:
                 cached_plan = cache_result.cache_content
@@ -1434,29 +1462,44 @@ class Agent:
                     # current_step 悬空为 pending.
                     if self.session_recorder and self.session_recorder.current_step:
                         self.session_recorder.complete_step("cached plan loaded")
+                    replay_error: str | None = None
                     try:
                         success = await self._replay_cached_plan(
                             cached_plan.yaml_workflow
                         )
-                        if self.recorder:
-                            self.recorder.finish_task(
-                                status="finished" if success else "failed"
-                            )
-                        # F4:cache-hit 分支提前 return,需要在此处收尾 group
-                        if self.session_recorder and _act_group:
-                            self.session_recorder.end_group(_act_group)
-                            _act_group = None
-                        return success
+                        if success:
+                            if self.recorder:
+                                self.recorder.finish_task(status="finished")
+                            # F4:cache-hit 分支提前 return,需要在此处收尾 group
+                            if self.session_recorder and _act_group:
+                                self.session_recorder.end_group(_act_group)
+                                _act_group = None
+                            return True
+                        replay_error = "replay reported failure"
                     except Exception as e:
-                        logger.warning(
-                            f"Cached plan replay failed, falling back to AI: {e}"
-                        )
-                        # 缓存回放失败,重开一个外层步骤走正常 AI 规划流程
-                        if self.session_recorder:
-                            self.session_recorder.start_step("act", task_prompt)
+                        replay_error = str(e)
+                    # 回放失败(解析不了 / 某动作失败)一律回退 AI 规划,
+                    # 而不是把整个 ai_act 判为失败 —— 对齐 JS:缓存只是加速,
+                    # 不能因为一条(可能来自旧版/JS 版的)缓存让任务直接挂掉.
+                    logger.warning(
+                        f"Cached plan replay failed, falling back to AI: "
+                        f"{replay_error}"
+                    )
+                    if self.session_recorder:
+                        self.session_recorder.start_step("act", task_prompt)
 
         # ==================== 正常 AI 规划流程 ====================
-        max_replan_cycles = 10  # 对应 JS: replanningCycleLimit
+        # 对齐 JS agent.ts:145-147 + MIDSCENE_REPLANNING_CYCLE_LIMIT 环境变量:
+        # 默认 20, UI-TARS 40(单步一动作), auto-GLM 100.
+        _limit_env = os.environ.get("MIDSCENE_REPLANNING_CYCLE_LIMIT")
+        if _limit_env:
+            max_replan_cycles = int(_limit_env)
+        elif _use_auto_glm:
+            max_replan_cycles = 100
+        elif _use_ui_tars:
+            max_replan_cycles = 40
+        else:
+            max_replan_cycles = 20
         replan_count = 0
         conversation_history: List[str] = []
         all_executed_actions: List[Dict[str, Any]] = []  # 收集所有执行的动作，用于缓存
@@ -1562,6 +1605,15 @@ class Agent:
                 should_continue = plan_result.get("shouldContinuePlanning", False)
 
                 if not actions:
+                    # 对齐 JS tasks.ts:394,442-444: 空动作 + 不再继续规划
+                    # 是合法的"无事可做/任务已完成"信号(例如"有弹窗就关掉"
+                    # 而页面没有弹窗), 正常结束而不是报错.
+                    if not should_continue:
+                        logger.info(
+                            "Planner returned no actions and no further "
+                            "planning — treating task as complete"
+                        )
+                        break
                     logger.warning("AI returned empty action plan")
                     conversation_history.append("No actions planned")
                     # H4:连续两次空计划 → 视为规划失败,**不**静默返回 True.
@@ -1612,11 +1664,15 @@ class Agent:
                 # 6. Replan
                 replan_count += 1
                 if replan_count > max_replan_cycles:
-                    logger.error(
+                    # 对齐 JS tasks.ts:449-452 / task-runner.ts:363:
+                    # 任务没完成(模型仍要求继续)必须报错, 不能返回成功,
+                    # 更不能把执行到一半的动作序列固化进缓存.
+                    raise RuntimeError(
                         f"Max replan cycles ({max_replan_cycles}) exceeded "
-                        f"for task: '{task_prompt}'"
+                        f"for task: '{task_prompt}' — task is incomplete. "
+                        f"Raise MIDSCENE_REPLANNING_CYCLE_LIMIT if the task "
+                        f"legitimately needs more steps."
                     )
-                    break
 
                 logger.info(
                     f"Replanning (cycle {replan_count}/{max_replan_cycles})"
@@ -1625,8 +1681,15 @@ class Agent:
                 await asyncio.sleep(0.5)
 
             # ==================== 缓存写入（与 JS 版本对齐） ====================
-            if use_cache and self.task_cache and all_executed_actions:
-                yaml_workflow = self._actions_to_yaml_workflow(all_executed_actions)
+            if (
+                use_cache
+                and self.task_cache
+                and _plan_cacheable
+                and all_executed_actions
+            ):
+                yaml_workflow = self._actions_to_yaml_workflow(
+                    all_executed_actions, task_prompt
+                )
                 self.task_cache.append_cache(PlanningCache(
                     type="plan",
                     prompt=task_prompt,
@@ -1853,38 +1916,129 @@ class Agent:
 
         return answer
 
-    def _actions_to_yaml_workflow(self, actions: List[Dict[str, Any]]) -> str:
+    # 动作类型 ↔ JS yaml flow 键(interfaceAlias)的映射.
+    # 对齐 JS device/index.ts 的 actionSpace + common.ts buildYamlFlowFromPlans:
+    # flowKey = interfaceAlias || name(Sleep 无 alias, 用原名).
+    _FLOW_KEY_BY_ACTION_TYPE = {
+        "Tap": "aiTap",
+        "RightClick": "aiRightClick",
+        "DoubleClick": "aiDoubleClick",
+        "Hover": "aiHover",
+        "Input": "aiInput",
+        "KeyboardPress": "aiKeyboardPress",
+        "Scroll": "aiScroll",
+        "DragAndDrop": "aiDragAndDrop",
+        "Sleep": "Sleep",
+    }
+    # 读取侧反向映射, 额外接受 yaml 脚本里的小写 `sleep` 内置项.
+    _ACTION_TYPE_BY_FLOW_KEY = {
+        **{v: k for k, v in _FLOW_KEY_BY_ACTION_TYPE.items()},
+        "sleep": "Sleep",
+    }
+    # 这些 param 字段是 locator(JS MidsceneLocationType), 序列化时只保留 prompt
+    _LOCATOR_PARAM_FIELDS = ("locate", "from", "to")
+
+    def _actions_to_yaml_workflow(
+        self, actions: List[Dict[str, Any]], task_prompt: str
+    ) -> str:
         """
-        将动作列表序列化为 YAML workflow 字符串（用于缓存）
+        将动作列表序列化为 JS 兼容的 MidsceneYamlScript 字符串（用于缓存）.
 
-        对应 JS 版本: agent.ts 中 yamlFlow 的序列化逻辑
-
-        Args:
-            actions: 执行过的动作列表
-
-        Returns:
-            YAML 格式的 workflow 字符串
+        对齐 JS agent.ts:948-957: `yaml.dump({tasks: [{name, flow}]})`,
+        flow 项为 `{<interfaceAlias>: '', ...param}`、locator 字段降为 prompt
+        字符串(common.ts `dumpActionParam`). 缓存文件必须能被 JS 版读取.
         """
         import yaml
 
-        # 构建与 JS 版本兼容的 workflow 结构
-        workflow = []
+        flow: list[dict[str, Any]] = []
         for action in actions:
-            step = {
-                "type": action.get("type", ""),
-                "param": action.get("param", {}),
-            }
-            thought = action.get("thought", "")
-            if thought:
-                step["thought"] = thought
-            workflow.append(step)
+            action_type = action.get("type", "")
+            flow_key = self._FLOW_KEY_BY_ACTION_TYPE.get(action_type)
+            if flow_key is None:
+                logger.warning(
+                    f"Cannot convert action {action_type} to yaml flow, ignored"
+                )
+                continue
+            item: dict[str, Any] = {flow_key: ""}
+            param = action.get("param") or {}
+            if isinstance(param, dict):
+                for key, value in param.items():
+                    if key in self._LOCATOR_PARAM_FIELDS and isinstance(
+                        value, dict
+                    ):
+                        prompt = value.get("prompt")
+                        if isinstance(prompt, dict):
+                            prompt = prompt.get("prompt")
+                        if prompt:
+                            item[key] = prompt
+                    else:
+                        item[key] = value
+            flow.append(item)
 
         return yaml.dump(
-            workflow,
+            {"tasks": [{"name": task_prompt, "flow": flow}]},
             default_flow_style=False,
             allow_unicode=True,
-            sort_keys=False
+            sort_keys=False,
         )
+
+    def _parse_cached_workflow(
+        self, yaml_workflow: str
+    ) -> list[dict[str, Any]] | None:
+        """
+        解析缓存的 yaml workflow, 返回 [{type, param}] 动作列表.
+
+        同时支持两种格式:
+        - JS MidsceneYamlScript: `{tasks: [{name, flow: [{aiTap: '', ...}]}]}`
+        - 旧版 Python 裸列表: `[{type, param, thought}]`(0.3.1 及之前写入)
+
+        解析失败返回 None(调用方回退 AI 规划, 不能当作任务失败).
+        """
+        import yaml
+
+        loaded = yaml.safe_load(yaml_workflow)
+
+        if isinstance(loaded, list):  # 旧版 Python 格式
+            return [a for a in loaded if isinstance(a, dict) and a.get("type")]
+
+        if isinstance(loaded, dict) and isinstance(loaded.get("tasks"), list):
+            actions: list[dict[str, Any]] = []
+            for task in loaded["tasks"]:
+                for item in (task or {}).get("flow") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    flow_key = next(
+                        (
+                            k
+                            for k in item
+                            if k in self._ACTION_TYPE_BY_FLOW_KEY
+                        ),
+                        None,
+                    )
+                    if flow_key is None:
+                        logger.warning(
+                            f"Unsupported cached flow item, ignored: "
+                            f"{list(item.keys())}"
+                        )
+                        continue
+                    action_type = self._ACTION_TYPE_BY_FLOW_KEY[flow_key]
+                    param = {
+                        k: v for k, v in item.items() if k != flow_key
+                    }
+                    # yaml 脚本简写: `aiTap: 'login button'` / `sleep: 2000`
+                    key_value = item[flow_key]
+                    if key_value not in ("", None):
+                        if action_type == "Sleep":
+                            param.setdefault("timeMs", key_value)
+                        else:
+                            param.setdefault("locate", key_value)
+                    actions.append({"type": action_type, "param": param})
+            return actions
+
+        logger.warning(
+            f"Unrecognized cached workflow shape: {type(loaded).__name__}"
+        )
+        return None
 
     async def _replay_cached_plan(self, yaml_workflow: str) -> bool:
         """
@@ -1902,12 +2056,10 @@ class Agent:
         Returns:
             是否全部成功
         """
-        import yaml
-
         try:
-            actions = yaml.safe_load(yaml_workflow)
-            if not isinstance(actions, list):
-                logger.warning(f"Cached workflow is not a list: {type(actions)}")
+            actions = self._parse_cached_workflow(yaml_workflow)
+            if not actions:
+                logger.warning("Cached workflow parsed empty, fallback to AI")
                 return False
 
             logger.info(f"Replaying cached plan: {len(actions)} actions")
@@ -2120,30 +2272,35 @@ class Agent:
 
             elif action_upper in ("Scroll", "scroll"):
                 direction = param.get("direction", "down")
-                distance = param.get("distance", 500)
+                # 对齐 JS `param?.distance || undefined`: 不传则用 interface
+                # 默认值(web 视口 70%、Android 整屏、iOS 1/3 屏)
+                distance = param.get("distance") or None
                 # 兼容 JS 老版别名:once/untilBottom/untilTop/untilLeft/untilRight
-                scroll_type_raw = param.get("scrollType", "singleAction")
+                scroll_type_raw = param.get("scrollType") or "singleAction"
                 _scroll_alias = {
                     "once": "singleAction",
                     "untilBottom": "scrollToBottom",
                     "untilTop": "scrollToTop",
-                    "untilLeft": "singleAction",
-                    "untilRight": "singleAction",
+                    "untilLeft": "scrollToLeft",
+                    "untilRight": "scrollToRight",
                 }
                 scroll_type = _scroll_alias.get(scroll_type_raw, scroll_type_raw)
 
-                if scroll_type == "scrollToBottom":
-                    for _ in range(20):
-                        await self.interface.scroll("down", 800)
-                        await asyncio.sleep(0.3)
-                elif scroll_type == "scrollToTop":
-                    await self.interface.evaluate_javascript(
-                        "window.scrollTo(0, 0)"
-                    )
-                    await asyncio.sleep(0.3)
-                else:
-                    await self.interface.scroll(direction, distance)
-                    await asyncio.sleep(0.5)
+                # 对齐 JS web-page.ts:488-495: 规划器指定了 locate 时,
+                # 元素中心作为滚动起点(可滚动内部容器/指定列表)
+                starting_point = _extract_center(param)
+                if starting_point is None:
+                    prompt = _extract_prompt(param)
+                    if prompt:
+                        element = await self.ai_locate(prompt)
+                        if element:
+                            starting_point = (
+                                element.center[0],
+                                element.center[1],
+                            )
+                await self._perform_scroll(
+                    direction, distance, scroll_type, starting_point
+                )
                 return True
 
             elif action_upper in (
@@ -2281,7 +2438,7 @@ class Agent:
     async def ai_scroll(
         self,
         direction: str = "down",
-        distance: int = 500,
+        distance: int | None = None,
         scroll_type: str = "singleAction",
         locate_prompt: Optional[str] = None
     ) -> bool:
@@ -2321,46 +2478,9 @@ class Agent:
                 if element:
                     starting_point = (element.center[0], element.center[1])
 
-            scroll_until_methods = {
-                "scrollToTop": "scroll_until_top",
-                "scrollToBottom": "scroll_until_bottom",
-                "scrollToLeft": "scroll_until_left",
-                "scrollToRight": "scroll_until_right",
-            }
-            if scroll_type in scroll_until_methods:
-                # Android/iOS 等原生设备实现了 scroll_until_*（支持从定位元素
-                # 起手势）；web interface 没有，走 evaluate_javascript。
-                native = getattr(
-                    self.interface, scroll_until_methods[scroll_type], None
-                )
-                if callable(native):
-                    await native(start_point=starting_point)
-                else:
-                    scripts = {
-                        "scrollToTop": "window.scrollTo(window.scrollX, 0)",
-                        "scrollToBottom": (
-                            "window.scrollTo(window.scrollX, "
-                            "document.body.scrollHeight)"
-                        ),
-                        "scrollToLeft": "window.scrollTo(0, window.scrollY)",
-                        "scrollToRight": (
-                            "window.scrollTo(document.body.scrollWidth, "
-                            "window.scrollY)"
-                        ),
-                    }
-                    await self.interface.evaluate_javascript(
-                        scripts[scroll_type]
-                    )
-                await asyncio.sleep(0.3)
-            else:
-                # singleAction
-                if starting_point is not None:
-                    await self._scroll_from_point(
-                        direction, distance, starting_point
-                    )
-                else:
-                    await self.interface.scroll(direction, distance)
-                await asyncio.sleep(0.5)
+            await self._perform_scroll(
+                direction, distance, scroll_type, starting_point
+            )
 
             if self.session_recorder:
                 screenshot_after = await self._capture_recording_screenshot()
@@ -2375,10 +2495,61 @@ class Agent:
                 self.session_recorder.fail_step(str(e))
             return False
 
+    async def _perform_scroll(
+        self,
+        direction: str,
+        distance: int | None,
+        scroll_type: str,
+        starting_point: tuple[float, float] | None,
+    ) -> None:
+        """
+        滚动路由（ai_scroll 与规划执行器共用）。
+
+        scrollTo* 优先用 interface 原生的 `scroll_until_*`（Android/iOS 手势、
+        Playwright mouse.wheel ±9999999，均支持从定位元素起步）；没有时回退
+        `window.scrollTo` 脚本。singleAction 带起点时走 `_scroll_from_point`。
+        """
+        scroll_until_methods = {
+            "scrollToTop": "scroll_until_top",
+            "scrollToBottom": "scroll_until_bottom",
+            "scrollToLeft": "scroll_until_left",
+            "scrollToRight": "scroll_until_right",
+        }
+        if scroll_type in scroll_until_methods:
+            native = getattr(
+                self.interface, scroll_until_methods[scroll_type], None
+            )
+            if callable(native):
+                await native(start_point=starting_point)
+            else:
+                scripts = {
+                    "scrollToTop": "window.scrollTo(window.scrollX, 0)",
+                    "scrollToBottom": (
+                        "window.scrollTo(window.scrollX, "
+                        "document.body.scrollHeight)"
+                    ),
+                    "scrollToLeft": "window.scrollTo(0, window.scrollY)",
+                    "scrollToRight": (
+                        "window.scrollTo(document.body.scrollWidth, "
+                        "window.scrollY)"
+                    ),
+                }
+                await self.interface.evaluate_javascript(scripts[scroll_type])
+            await asyncio.sleep(0.3)
+        else:
+            # singleAction
+            if starting_point is not None:
+                await self._scroll_from_point(
+                    direction, distance, starting_point
+                )
+            else:
+                await self.interface.scroll(direction, distance)
+            await asyncio.sleep(0.5)
+
     async def _scroll_from_point(
         self,
         direction: str,
-        distance: int,
+        distance: int | None,
         starting_point: tuple[float, float],
     ) -> None:
         """
@@ -2409,16 +2580,9 @@ class Agent:
             )
             return
 
-        delta_y = (
-            distance
-            if direction == "down"
-            else -distance if direction == "up" else 0
-        )
-        delta_x = (
-            distance
-            if direction == "right"
-            else -distance if direction == "left" else 0
-        )
+        d = distance if distance is not None else 500
+        delta_y = d if direction == "down" else -d if direction == "up" else 0
+        delta_x = d if direction == "right" else -d if direction == "left" else 0
         await self.interface.evaluate_javascript(f"""
             (() => {{
                 const el = document.elementFromPoint(

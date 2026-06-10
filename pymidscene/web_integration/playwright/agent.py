@@ -237,7 +237,9 @@ class PlaywrightAgent:
         Raises:
             TimeoutError: 超时未满足条件
         """
-        return await self._agent.ai_wait_for(assertion, timeout, interval)
+        return await self._agent.ai_wait_for(
+            assertion, timeout=timeout, interval=interval
+        )
 
     async def ai_scroll(
         self,

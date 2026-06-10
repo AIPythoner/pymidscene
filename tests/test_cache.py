@@ -37,17 +37,15 @@ def test_task_cache_initialization(temp_cache_dir):
 
 
 def test_task_cache_sanitize_cache_id(temp_cache_dir):
-    """测试缓存 ID 清理"""
+    """缓存 ID 清理须与 JS `replaceIllegalPathCharsAndSpace` 逐字符一致:
+    `[:*?"<>|# ]` → `-`, 路径分隔符保留(JS 有意如此), 否则同一 cache_id
+    在两种语言下生成不同文件名, 跨语言读不到对方的缓存."""
     cache = TaskCache(
-        cache_id="test/cache:with<illegal>chars",
+        cache_id="test cache:with<illegal>chars#2",
         cache_dir=temp_cache_dir
     )
 
-    # 非法字符应该被替换
-    assert "/" not in cache.cache_id
-    assert ":" not in cache.cache_id
-    assert "<" not in cache.cache_id
-    assert ">" not in cache.cache_id
+    assert cache.cache_id == "test-cache-with-illegal-chars-2"
 
 
 def test_append_planning_cache(temp_cache_dir):
@@ -244,6 +242,27 @@ def test_write_only_mode(temp_cache_dir):
         cache_dir=temp_cache_dir
     )
     assert len(cache2.cache.caches) == 2
+
+
+def test_write_only_multiple_appends_do_not_duplicate(temp_cache_dir):
+    """write-only 每次 flush 都读回磁盘合并 —— 已落盘的增量必须从内存清掉,
+    否则第 N 次 append 后文件里出现指数级重复记录."""
+    cache = TaskCache(
+        cache_id="test_writeonly_dedup",
+        cache_dir=temp_cache_dir,
+        strategy="write-only",
+    )
+    for prompt in ("a", "b", "c"):
+        cache.append_cache(PlanningCache(
+            type="plan", prompt=prompt, yaml_workflow=prompt
+        ))
+
+    reloaded = TaskCache(
+        cache_id="test_writeonly_dedup",
+        cache_dir=temp_cache_dir,
+    )
+    prompts = [c.prompt for c in reloaded.cache.caches]
+    assert prompts == ["a", "b", "c"]
 
 
 def test_cache_stats(temp_cache_dir):

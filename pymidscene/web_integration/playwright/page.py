@@ -50,6 +50,11 @@ class WebPage(AbstractInterface):
             else self.DEFAULT_WAIT_FOR_NETWORK_IDLE_TIMEOUT
         )
 
+        # 对齐 JS base-page.ts:508 `everMoved`: 鼠标是否被移动过.
+        # 滚动前只有"从未移动过"才把指针挪到视口中心, 否则保留上次位置
+        # (hover 某容器后滚动应滚那个容器).
+        self._mouse_ever_moved = False
+
         logger.debug(
             f"WebPage initialized: "
             f"nav_timeout={self.wait_for_navigation_timeout}ms, "
@@ -174,6 +179,7 @@ class WebPage(AbstractInterface):
 
         click_x, click_y = await self._ensure_in_viewport(x, y)
         await self.page.mouse.click(click_x, click_y)
+        self._mouse_ever_moved = True
 
         # 等待可能的导航
         await self.wait_for_navigation()
@@ -264,6 +270,7 @@ class WebPage(AbstractInterface):
             await self.page.mouse.move(ix, iy)
             await asyncio.sleep(0.02)
         await self.page.mouse.up()
+        self._mouse_ever_moved = True
         await self.wait_for_navigation()
 
     async def hover(self, x: float, y: float) -> None:
@@ -278,6 +285,7 @@ class WebPage(AbstractInterface):
 
         hover_x, hover_y = await self._ensure_in_viewport(x, y)
         await self.page.mouse.move(hover_x, hover_y)
+        self._mouse_ever_moved = True
 
     async def scroll(
         self,
@@ -309,15 +317,10 @@ class WebPage(AbstractInterface):
             else:
                 distance = int(size["width"] * 0.7)
 
-        # 滚动前先移动鼠标到指定位置或视口中心
-        # 对应 JS: moveToPointBeforeScroll()
-        if starting_point:
-            await self.page.mouse.move(starting_point["x"], starting_point["y"])
-        else:
-            size = await self.get_size()
-            center_x = int(size["width"] / 2)
-            center_y = int(size["height"] / 2)
-            await self.page.mouse.move(center_x, center_y)
+        # 滚动前先移动鼠标到指定位置；无指定位置时只有"鼠标从未移动过"
+        # 才移到视口中心（对应 JS moveToPointBeforeScroll 的 everMoved 语义：
+        # hover 某容器后滚动应保留指针位置、滚动那个容器）
+        await self._move_to_point_before_scroll(starting_point)
 
         # 根据方向计算滚动量
         delta_x = 0
@@ -339,6 +342,68 @@ class WebPage(AbstractInterface):
 
         # 等待滚动完成（与 JS 版本 sleep(500) 对齐）
         await asyncio.sleep(0.5)
+
+    async def _move_to_point_before_scroll(
+        self, starting_point: dict | None
+    ) -> None:
+        """对应 JS base-page.ts:509-519 `moveToPointBeforeScroll`."""
+        if starting_point:
+            await self.page.mouse.move(starting_point["x"], starting_point["y"])
+            self._mouse_ever_moved = True
+        elif not self._mouse_ever_moved:
+            size = await self.get_size()
+            await self.page.mouse.move(
+                int(size["width"] / 2), int(size["height"] / 2)
+            )
+            self._mouse_ever_moved = True
+
+    @staticmethod
+    def _start_point_to_dict(
+        start_point: tuple[float, float] | None,
+    ) -> dict | None:
+        if start_point is None:
+            return None
+        return {"x": start_point[0], "y": start_point[1]}
+
+    async def scroll_until_top(
+        self, start_point: tuple[float, float] | None = None
+    ) -> None:
+        """对应 JS base-page.ts:521-524 `scrollUntilTop`: 大值 mouse.wheel.
+
+        能滚动指针下方的内部滚动容器（SPA 列表/模态框），这是
+        `window.scrollTo` 做不到的。
+        """
+        await self._move_to_point_before_scroll(
+            self._start_point_to_dict(start_point)
+        )
+        await self.page.mouse.wheel(0, -9999999)
+
+    async def scroll_until_bottom(
+        self, start_point: tuple[float, float] | None = None
+    ) -> None:
+        """对应 JS `scrollUntilBottom`."""
+        await self._move_to_point_before_scroll(
+            self._start_point_to_dict(start_point)
+        )
+        await self.page.mouse.wheel(0, 9999999)
+
+    async def scroll_until_left(
+        self, start_point: tuple[float, float] | None = None
+    ) -> None:
+        """对应 JS `scrollUntilLeft`."""
+        await self._move_to_point_before_scroll(
+            self._start_point_to_dict(start_point)
+        )
+        await self.page.mouse.wheel(-9999999, 0)
+
+    async def scroll_until_right(
+        self, start_point: tuple[float, float] | None = None
+    ) -> None:
+        """对应 JS `scrollUntilRight`."""
+        await self._move_to_point_before_scroll(
+            self._start_point_to_dict(start_point)
+        )
+        await self.page.mouse.wheel(9999999, 0)
 
     async def key_press(self, key: str) -> None:
         """

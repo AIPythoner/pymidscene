@@ -40,6 +40,35 @@ from ..shared.logger import logger
 from ..shared.types import LocateResultElement
 
 
+# step.action_type(小写、去下划线) → JS 报告的 (type, subType).
+# subType 必须是 JS 前端精确匹配的 camelCase 形式(sidebar/replay 按字面比较).
+_JS_TASK_TYPE_MAP: dict[str, tuple] = {
+    "click": ("Action Space", "Tap"),
+    "tap": ("Action Space", "Tap"),
+    "input": ("Action Space", "Input"),
+    "scroll": ("Action Space", "Scroll"),
+    "hover": ("Action Space", "Hover"),
+    "rightclick": ("Action Space", "RightClick"),
+    "doubleclick": ("Action Space", "DoubleClick"),
+    "keyboardpress": ("Action Space", "KeyboardPress"),
+    "keypress": ("Action Space", "KeyboardPress"),
+    "drag": ("Action Space", "DragAndDrop"),
+    "draganddrop": ("Action Space", "DragAndDrop"),
+    "sleep": ("Action Space", "Sleep"),
+    "locate": ("Insight", "Locate"),
+    "assert": ("Insight", "Assert"),
+    "waitfor": ("Insight", "WaitFor"),
+    "query": ("Insight", "Query"),
+    "boolean": ("Insight", "Boolean"),
+    "number": ("Insight", "Number"),
+    "string": ("Insight", "String"),
+    "ask": ("Insight", "Query"),
+    "act": ("Planning", "Plan"),
+    "plan": ("Planning", "Plan"),
+    "replay": ("Planning", "Plan"),
+}
+
+
 class ExecutionRecorder:
     """执行记录器 - 记录单次执行的详细信息"""
 
@@ -383,14 +412,17 @@ class SessionRecorder:
             return
         self.current_step.cache_hit = True
         self.current_step.cache_type = cache_type
-        hit: Dict[str, Any] = {"from": "cache", "cache_type": cache_type}
+        # 结构对齐 JS types.ts:341-344 `{from, context}`;
+        # 报告前端精确匹配大写 `hitBy?.from === 'Cache'` 才显示 cache 徽标
+        # (apps/report sidebar/index.tsx:144).
+        context: dict[str, Any] = {"cache_type": cache_type}
         if xpath:
-            hit["xpath"] = xpath
+            context["xpath"] = xpath
         if prompt:
-            hit["prompt"] = prompt
+            context["prompt"] = prompt
         if extra:
-            hit.update(extra)
-        self.current_step.hit_by = hit
+            context.update(extra)
+        self.current_step.hit_by = {"from": "Cache", "context": context}
 
     # ---- F4: subtask grouping ----------------------------------------
     # When the agent opens a group (e.g. ai_act wraps its planner loop),
@@ -464,7 +496,12 @@ class SessionRecorder:
 
     def _build_report_session(self) -> ReportSession:
         """构建报告会话对象"""
-        success_count = sum(1 for s in self.steps if s.status == "success")
+        # "success (cached)" 等带注记的成功状态也要计入成功
+        success_count = sum(
+            1
+            for s in self.steps
+            if s.status and s.status not in ("failed", "pending", "running")
+        )
         failed_count = sum(1 for s in self.steps if s.status == "failed")
 
         overall_status = "success"
@@ -514,27 +551,35 @@ class SessionRecorder:
         if not self.js_react_generator:
             raise RuntimeError("JS React generator not initialized")
         
-        # 初始化会话
+        # 初始化会话(modelBriefs 取各步骤实际用到的模型名)
+        model_name = next(
+            (s.ai_model for s in self.steps if s.ai_model), None
+        )
         self.js_react_generator.start_session(
             group_name=f"PyMidscene Session - {self.session_id}",
             description=f"Driver: {self.driver_type}",
+            model_name=model_name,
         )
         
         # 将步骤转换为 JS React 格式
         for step in self.steps:
-            # 映射操作类型到 JS 版本格式
-            task_type = "Insight"
-            sub_type = step.action_type.capitalize()
-            
-            if step.action_type in ["click", "tap", "input", "scroll"]:
-                task_type = "Action Space"
-                sub_type = "Tap" if step.action_type in ["click", "tap"] else step.action_type.capitalize()
-            elif step.action_type in ["locate"]:
-                task_type = "Planning"
-                sub_type = "Locate"
-            elif step.action_type in ["assert", "query"]:
-                task_type = "Insight"
-                sub_type = step.action_type.capitalize()
+            # 显式映射操作类型 → JS (type, subType)。不能用 capitalize():
+            # JS 前端精确匹配 camelCase 子类型(如 `subType === 'WaitFor'`,
+            # sidebar:113), "Rightclick"/"Waitfor" 会丢图标和回放指针动效。
+            task_type, sub_type = _JS_TASK_TYPE_MAP.get(
+                step.action_type.lower().replace("_", ""),
+                ("Insight", step.action_type.capitalize()),
+            )
+
+            # 报告 status 只认 finished/failed/pending(replay-scripts.ts
+            # 对非 finished 注入 "unknown error" 帧)。"success (cached)" 等
+            # 带注记的成功状态必须归一化为 finished, 缓存来源经 hitBy 表达。
+            if step.status == "failed":
+                js_status = "failed"
+            elif step.status in (None, "", "pending", "running"):
+                js_status = "pending"
+            else:
+                js_status = "finished"
             
             # 转换元素信息
             element_rect = None
@@ -562,7 +607,7 @@ class SessionRecorder:
                 task_type=task_type,
                 sub_type=sub_type,
                 prompt=step.prompt,
-                status="finished" if step.status == "success" else "failed" if step.status == "failed" else "pending",
+                status=js_status,
                 screenshot_before=step.screenshot_before,
                 screenshot_after=step.screenshot_after,
                 element_rect=element_rect,

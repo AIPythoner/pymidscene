@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import hashlib
 import os
+import re as _re
 import yaml
 import json
 
@@ -21,9 +22,19 @@ from ...shared.utils import calculate_hash
 _JS_LOWEST_SUPPORTED_VERSION = "0.17.0"
 
 
-def _sha256_hex(text: str) -> str:
-    """sha256 摘要 —— 与 JS `generateHashId` 对齐的 hash 算法."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _generate_hash_id(content: str) -> str:
+    """
+    对齐 JS shared/utils.ts `generateHashId(undefined, content)`:
+    sha256(JSON.stringify({content})) 的 hex 逐字符映射到 a-z, 取前 5 位.
+    必须逐位复刻, 否则超长 cache_id 在两种语言下生成不同文件名,
+    跨语言读不到对方的缓存.
+    """
+    combined = json.dumps(
+        {"content": content}, separators=(",", ":"), ensure_ascii=False
+    )
+    hex_digest = hashlib.sha256(combined.encode("utf-8")).hexdigest()
+    letters = "".join(chr(97 + int(c, 16) % 26) for c in hex_digest)
+    return letters[:5]
 
 
 def _get_cache_max_filename_length() -> int:
@@ -129,8 +140,7 @@ class TaskCache:
         max_filename_length = _get_cache_max_filename_length()
         if len(safe_cache_id.encode('utf-8')) > max_filename_length:
             prefix = safe_cache_id[:32]
-            # 与 JS `generateHashId` 对齐 —— 使用 sha256 前 8 位以保证跨语言 hash 一致
-            hash_suffix = _sha256_hex(safe_cache_id)[:8]
+            hash_suffix = _generate_hash_id(safe_cache_id)
             safe_cache_id = f"{prefix}-{hash_suffix}"
 
         self.cache_id = safe_cache_id
@@ -186,15 +196,13 @@ class TaskCache:
         )
 
     def _sanitize_cache_id(self, cache_id: str) -> str:
-        """清理缓存 ID，移除非法字符"""
-        # 替换非法路径字符
-        illegal_chars = '<>:"|?*\\/\n\r\t'
-        safe_id = cache_id
-        for char in illegal_chars:
-            safe_id = safe_id.replace(char, "_")
-        # 替换空格
-        safe_id = safe_id.replace(" ", "-")
-        return safe_id
+        """
+        清理缓存 ID. 对齐 JS shared/utils.ts
+        `replaceIllegalPathCharsAndSpace`: `[:*?"<>|# ]` 统一替换为 `-`.
+        字符集与替换符必须与 JS 完全一致, 否则同一 cache_id 在两种语言下
+        生成不同文件名. (JS 有意保留路径分隔符, 这里照搬.)
+        """
+        return _re.sub(r'[:*?"<>|# ]', "-", cache_id)
 
     def match_cache(
         self,
@@ -438,8 +446,14 @@ class TaskCache:
 
             logger.debug(
                 f"Cache flushed to file: {self.cache_file_path}, "
-                f"records={len(self.cache.caches)}"
+                f"records={len(merged_records)}"
             )
+
+            if self.write_only_mode:
+                # 已落盘的增量必须从内存清掉:write-only 每次 flush 都会从
+                # 磁盘读回旧记录再合并,内存里留着已写过的记录会让它们
+                # 在下一次 flush 时再次拼接 → 指数级重复.
+                self.cache.caches = []
 
         except Exception as e:
             logger.error(f"Failed to write cache file: {self.cache_file_path}, error: {e}")

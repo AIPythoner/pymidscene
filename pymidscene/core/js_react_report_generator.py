@@ -29,8 +29,26 @@ from .report_template_resources import (
 
 
 def _escape_script_tag(content: str) -> str:
-    """转义 script 标签内容，防止 HTML 解析错误"""
-    return content.replace('</script>', '<\\/script>')
+    """
+    转义注入 script 标签的 dump 内容。
+
+    对齐 JS shared/utils.ts `escapeScriptTag`: 把**所有** `<` / `>` 替换为
+    `__midscene_lt__` / `__midscene_gt__`。打包的报告 bundle 在解析前
+    无条件执行 `antiEscapeScriptTag`(App.tsx:304)还原 —— 两边必须严格
+    对称。只替换字面量 `</script>` 是不够的: HTML 对闭合标签的匹配大小写
+    不敏感(`</Script>`、`</script >` 同样终止 script 元素), dump 里的
+    AI rawResponse / 抽取数据出现这些序列时会把整页打碎。
+    """
+    return content.replace("<", "__midscene_lt__").replace(
+        ">", "__midscene_gt__"
+    )
+
+
+def _anti_escape_script_tag(content: str) -> str:
+    """对齐 JS `antiEscapeScriptTag`(测试/工具读回 dump 时使用)."""
+    return content.replace("__midscene_lt__", "<").replace(
+        "__midscene_gt__", ">"
+    )
 
 
 @dataclass
@@ -77,17 +95,29 @@ class TaskTiming:
 
 @dataclass
 class AIUsage:
-    """AI 使用信息"""
+    """
+    AI 使用信息 - 对齐 JS core/types.ts `AIUsageInfo`.
+
+    报告前端从 `task.usage.model_name` / `time_cost` 读取模型名与耗时
+    (sidebar/index.tsx:240-260), 不读 task 顶层字段.
+    """
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    model_name: str | None = None
+    time_cost: float | None = None  # 毫秒
 
     def to_dict(self) -> dict:
-        return {
+        result: dict[str, Any] = {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
         }
+        if self.model_name:
+            result["model_name"] = self.model_name
+        if self.time_cost is not None:
+            result["time_cost"] = self.time_cost
+        return result
 
 
 @dataclass
@@ -146,7 +176,7 @@ class ExecutionTask:
     errorMessage: Optional[str] = None
 
     def to_dict(self) -> dict:
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "type": self.type,
             "status": self.status,
         }
@@ -445,13 +475,15 @@ class JSReactReportGenerator:
                 center=element_center,
             )]
         
-        # 构建 AI 使用信息
+        # 构建 AI 使用信息(model_name/time_cost 是报告前端实际读取的位置)
         usage = None
-        if ai_tokens or ai_prompt_tokens or ai_completion_tokens:
+        if ai_tokens or ai_prompt_tokens or ai_completion_tokens or ai_model:
             usage = AIUsage(
                 prompt_tokens=ai_prompt_tokens or 0,
                 completion_tokens=ai_completion_tokens or 0,
                 total_tokens=ai_tokens or (ai_prompt_tokens or 0) + (ai_completion_tokens or 0),
+                model_name=ai_model,
+                time_cost=float(duration_ms) if duration_ms else None,
             )
         
         # 构建时间信息
@@ -461,10 +493,17 @@ class JSReactReportGenerator:
             cost=duration_ms,
         )
         
-        # 构建参数
+        # 构建参数 —— 字段名对齐 JS ui-utils.ts `extractInsightParam`:
+        # Assert 读 param.assertion、Query 读 param.dataDemand,
+        # 其余(Locate/Planning/Action)读 param.prompt
         param = {}
         if prompt:
-            param["prompt"] = prompt
+            if sub_type == "Assert":
+                param["assertion"] = prompt
+            elif sub_type == "Query":
+                param["dataDemand"] = prompt
+            else:
+                param["prompt"] = prompt
         # 如果是 Locate 任务且有元素信息，添加 bbox 到 param
         if sub_type == "Locate" and element_rect:
             param["bbox"] = [
