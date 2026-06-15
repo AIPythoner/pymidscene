@@ -6,6 +6,7 @@
 
 import hashlib
 import json
+import math
 import re
 import base64
 from typing import Any, Optional, Dict, List, Union, Tuple
@@ -15,6 +16,18 @@ from PIL import Image
 
 # 默认 bbox 尺寸（用于点坐标转 bbox）- 对应 JS 的 defaultBboxSize
 DEFAULT_BBOX_SIZE = 20
+
+
+def js_round(value: float) -> int:
+    """
+    round-half-up，对齐 JS ``Math.round`` 的行为。
+
+    Python 内置 ``round`` 用 banker's rounding（round-half-to-even），
+    ``round(4.5)==4`` / ``round(0.5)==0``，而 JS ``Math.round`` 把 .5 一律
+    向 +∞ 取整（``Math.round(4.5)==5``）。所有坐标适配器必须用本函数，否则
+    在奇数宽视口上每个落在 .5 的像素都会与 JS 差 1px。
+    """
+    return math.floor(value + 0.5)
 
 
 def calculate_hash(text: str) -> str:
@@ -272,7 +285,10 @@ def adapt_doubao_bbox(
     assert (
         width > 0 and height > 0
     ), "width and height must be greater than 0 in doubao mode"
-    
+
+    # 原始输入长度 — JS 的 8-角分支用 `bbox.length`(原始参数), 不是展开后的列表
+    original_len = len(bbox) if isinstance(bbox, list) else None
+
     # 处理字符串格式："x1 y1 x2 y2"
     if isinstance(bbox, str):
         # 验证格式
@@ -280,70 +296,72 @@ def adapt_doubao_bbox(
             raise ValueError(
                 f"invalid bbox data string for doubao-vision mode: {bbox}"
             )
-        
+
         parts = bbox.strip().split()
         if len(parts) == 4:
             return (
-                round(int(parts[0]) * width / 1000),
-                round(int(parts[1]) * height / 1000),
-                round(int(parts[2]) * width / 1000),
-                round(int(parts[3]) * height / 1000),
+                js_round(int(parts[0]) * width / 1000),
+                js_round(int(parts[1]) * height / 1000),
+                js_round(int(parts[2]) * width / 1000),
+                js_round(int(parts[3]) * height / 1000),
             )
         raise ValueError(
             f"invalid bbox data string for doubao-vision mode: {bbox}"
         )
-    
+
     # 处理数组格式
     bbox_list: List[float] = []
     if isinstance(bbox, list):
-        # 处理字符串数组格式：["123 222", "789 100"] 或 ["123,222", "789,100"] 或 ["500", "300", "600", "400"]
+        # 字符串数组：对齐 JS — 每个含分隔符的字符串只取 **前两个** 数字
+        # (JS `const [x,y] = item.split(...)`), 而不是 extend 所有数字, 否则
+        # 像 ["940 445 969 490"] 会被当成 4-值矩形而非中心点, 点击目标不同.
         for item in bbox:
             if isinstance(item, str):
                 item = item.strip()
                 if ',' in item:
-                    # 格式: "123,222"
-                    parts = item.split(',')
-                    bbox_list.extend([float(p.strip()) for p in parts])
+                    x, _, rest = item.partition(',')
+                    y = rest.split(',')[0]
+                    bbox_list.append(float(x.strip()))
+                    bbox_list.append(float(y.strip()))
                 elif ' ' in item:
-                    # 格式: "123 222"
-                    parts = item.split()
-                    bbox_list.extend([float(p.strip()) for p in parts])
+                    toks = item.split()
+                    bbox_list.append(float(toks[0].strip()))
+                    bbox_list.append(float(toks[1].strip()))
                 else:
-                    # 单个数字字符串: "500"
                     bbox_list.append(float(item))
             else:
                 bbox_list.append(float(item))
-    
+
     # 4 或 5 个元素 - 标准 bbox
     if len(bbox_list) in (4, 5):
         return (
-            round(bbox_list[0] * width / 1000),
-            round(bbox_list[1] * height / 1000),
-            round(bbox_list[2] * width / 1000),
-            round(bbox_list[3] * height / 1000),
+            js_round(bbox_list[0] * width / 1000),
+            js_round(bbox_list[1] * height / 1000),
+            js_round(bbox_list[2] * width / 1000),
+            js_round(bbox_list[3] * height / 1000),
         )
-    
+
     # 2, 3, 6, 7 个元素 - 中心点模式，扩展为 bbox
     if len(bbox_list) in (2, 3, 6, 7):
         half_size = DEFAULT_BBOX_SIZE // 2
-        center_x = round(bbox_list[0] * width / 1000)
-        center_y = round(bbox_list[1] * height / 1000)
+        center_x = js_round(bbox_list[0] * width / 1000)
+        center_y = js_round(bbox_list[1] * height / 1000)
         return (
             max(0, center_x - half_size),
             max(0, center_y - half_size),
             min(width, center_x + half_size),
             min(height, center_y + half_size),
         )
-    
-    # 8 个元素 - 四角模式 (对应 JS: 取第 0,1,4,5 个点)
-    if len(bbox_list) == 8:
+
+    # 8 个元素 - 四角模式 (对应 JS: 取第 0,1,4,5 个点; 键于原始输入长度)
+    if original_len == 8 or len(bbox_list) == 8:
         return (
-            round(bbox_list[0] * width / 1000),
-            round(bbox_list[1] * height / 1000),
-            round(bbox_list[4] * width / 1000),
-            round(bbox_list[5] * height / 1000),
+            js_round(bbox_list[0] * width / 1000),
+            js_round(bbox_list[1] * height / 1000),
+            js_round(bbox_list[4] * width / 1000),
+            js_round(bbox_list[5] * height / 1000),
         )
-    
+
     raise ValueError(f"invalid bbox data for doubao-vision mode: {bbox}")
 
 
@@ -365,10 +383,10 @@ def adapt_qwen2_5_bbox(bbox: List) -> Tuple[int, int, int, int]:
         raise ValueError(f"Invalid bbox for qwen2.5-vl: {bbox}")
     
     return (
-        round(bbox[0]),
-        round(bbox[1]),
-        round(bbox[2]) if len(bbox) > 2 and bbox[2] is not None else round(bbox[0] + DEFAULT_BBOX_SIZE),
-        round(bbox[3]) if len(bbox) > 3 and bbox[3] is not None else round(bbox[1] + DEFAULT_BBOX_SIZE),
+        js_round(bbox[0]),
+        js_round(bbox[1]),
+        js_round(bbox[2]) if len(bbox) > 2 and bbox[2] is not None else js_round(bbox[0] + DEFAULT_BBOX_SIZE),
+        js_round(bbox[3]) if len(bbox) > 3 and bbox[3] is not None else js_round(bbox[1] + DEFAULT_BBOX_SIZE),
     )
 
 
@@ -394,10 +412,10 @@ def adapt_gemini_bbox(
     """
     # 注意：Gemini 的顺序是 [y1, x1, y2, x2]
     return (
-        round(bbox[1] * width / 1000),   # x1 = bbox[1]
-        round(bbox[0] * height / 1000),  # y1 = bbox[0]
-        round(bbox[3] * width / 1000),   # x2 = bbox[3]
-        round(bbox[2] * height / 1000),  # y2 = bbox[2]
+        js_round(bbox[1] * width / 1000),   # x1 = bbox[1]
+        js_round(bbox[0] * height / 1000),  # y1 = bbox[0]
+        js_round(bbox[3] * width / 1000),   # x2 = bbox[3]
+        js_round(bbox[2] * height / 1000),  # y2 = bbox[2]
     )
 
 
@@ -422,10 +440,10 @@ def normalized_0_1000(
         转换后的 bbox (x1, y1, x2, y2)
     """
     return (
-        round(bbox[0] * width / 1000),
-        round(bbox[1] * height / 1000),
-        round(bbox[2] * width / 1000),
-        round(bbox[3] * height / 1000),
+        js_round(bbox[0] * width / 1000),
+        js_round(bbox[1] * height / 1000),
+        js_round(bbox[2] * width / 1000),
+        js_round(bbox[3] * height / 1000),
     )
 
 
@@ -595,19 +613,33 @@ def adapt_bbox_to_rect(
         bottom_limit = height
     
     adapted = adapt_bbox(bbox, width, height, right_limit, bottom_limit, model_family)
-    
-    left = adapted[0] + offset_x
-    top = adapted[1] + offset_y
-    right = adapted[2] + offset_x
-    bottom = adapted[3] + offset_y
-    
+
+    # 对齐 JS adaptBboxToRect (common.ts): 把 rect 裁剪到图像范围内, 并保证
+    # 宽/高至少为 1 —— 否则退化的零面积 bbox(模型把元素定位成一个点, x1==x2)
+    # 会产生 width/height==0 的 rect, 中心点/标注计算异常.
+    rect_left = adapted[0]
+    rect_top = adapted[1]
+    rect_width = adapted[2] - adapted[0]
+    rect_height = adapted[3] - adapted[1]
+
+    if rect_left + rect_width > width:
+        rect_width = width - rect_left
+    if rect_top + rect_height > height:
+        rect_height = height - rect_top
+
+    rect_width = max(1, rect_width)
+    rect_height = max(1, rect_height)
+
+    left = rect_left + offset_x
+    top = rect_top + offset_y
+
     return {
         "left": float(left),
         "top": float(top),
-        "width": float(right - left),
-        "height": float(bottom - top),
-        "right": float(right),
-        "bottom": float(bottom),
+        "width": float(rect_width),
+        "height": float(rect_height),
+        "right": float(left + rect_width),
+        "bottom": float(top + rect_height),
     }
 
 
@@ -625,12 +657,14 @@ def format_bbox(bbox: tuple) -> Dict[str, float]:
         raise ValueError(f"bbox must have 4 elements, got {len(bbox)}")
 
     xmin, ymin, xmax, ymax = bbox
-    
+
+    # 对齐 JS adaptBboxToRect: 宽/高至少为 1, 避免退化的零面积 bbox
+    # (模型把元素定位成一个点 → xmax==xmin) 产生 width/height==0 的 rect.
     return {
         "left": float(xmin),
         "top": float(ymin),
-        "width": float(xmax - xmin),
-        "height": float(ymax - ymin),
+        "width": float(max(1, xmax - xmin)),
+        "height": float(max(1, ymax - ymin)),
     }
 
 
@@ -650,6 +684,7 @@ def calculate_center(rect: Dict[str, float]) -> tuple:
 
 
 __all__ = [
+    "js_round",
     "calculate_hash",
     "safe_parse_json",
     "extract_json_from_code_block",

@@ -99,10 +99,12 @@ def test_call_ai_rejects_empty_content(monkeypatch: Any) -> None:
             messages=[{"role": "user", "content": "hello"}],
             model_config=ModelConfig(model_name="test-model", retry_count=0),
         )
-    except ValueError as exc:
+    except Exception as exc:
+        # 最终失败被包成带模型名 + troubleshooting URL 的 RuntimeError
+        # (对齐 JS), 但原始 "empty content" 原因仍保留在消息里.
         assert "empty content from AI model" in str(exc)
     else:
-        raise AssertionError("Expected ValueError for empty model content")
+        raise AssertionError("Expected an error for empty model content")
 
 
 def test_call_ai_applies_qwen_high_resolution_by_model_family(monkeypatch: Any) -> None:

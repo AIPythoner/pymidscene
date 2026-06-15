@@ -25,12 +25,35 @@ from .constants import (
     MIDSCENE_USE_QWEN3_VL,
     MIDSCENE_USE_VLM_UI_TARS,
     MIDSCENE_USE_GEMINI,
+    MIDSCENE_MODEL_MAX_TOKENS,
+    OPENAI_MAX_TOKENS,
     ModelConfigKeys,
 )
 from ..logger import logger
 
 
 TIntent = Literal["default", "insight", "planning"]
+
+
+def get_configured_max_tokens() -> "int | None":
+    """
+    读取 ``MIDSCENE_MODEL_MAX_TOKENS`` → ``OPENAI_MAX_TOKENS``, 都未设置返回 None.
+
+    对齐 JS service-caller (``getEnvConfigValueAsNumber(MIDSCENE_MODEL_MAX_TOKENS)
+    ?? getEnvConfigValueAsNumber(OPENAI_MAX_TOKENS)``): 未配置时 JS 不发送
+    ``max_tokens``, 由 provider 用其(较大的)默认值. Python 此前硬编码 4096,
+    会把大的 extract/planning 响应截断成不完整 JSON → 解析失败.
+    """
+    for var in (MIDSCENE_MODEL_MAX_TOKENS, OPENAI_MAX_TOKENS):
+        raw = os.environ.get(var)
+        if raw and raw.strip():
+            try:
+                value = int(float(raw.strip()))
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                pass
+    return None
 
 
 @dataclass

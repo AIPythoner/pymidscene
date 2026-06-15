@@ -17,6 +17,7 @@ from typing import Any, cast
 from openai import OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 
+from ...shared.env import get_configured_max_tokens
 from ...shared.logger import logger
 from ...shared.utils import (
     extract_json_from_code_block,
@@ -190,7 +191,7 @@ class ModelConfig:
         base_url: str | None = None,
         api_key: str | None = None,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         timeout: int = 60000,  # 毫秒
         retry_count: int = 1,
         retry_interval: int = 2000,  # 毫秒
@@ -339,15 +340,21 @@ def call_ai(
 
     start_time = time.time()
     max_attempts = model_config.retry_count + 1
-    last_error: Exception | None = None
 
     # 准备请求参数
     request_params: dict[str, Any] = {
         "model": model_config.model_name,
         "messages": messages,
         "temperature": model_config.temperature,
-        "max_tokens": model_config.max_tokens,
     }
+    # 对齐 JS: 仅在显式配置了 max_tokens(构造参数或 MIDSCENE_MODEL_MAX_TOKENS
+    # / OPENAI_MAX_TOKENS 环境变量)时才发送, 否则省略, 由 provider 用其默认
+    # (较大)上限, 避免把大响应硬截断成不完整 JSON.
+    _max_tokens = model_config.max_tokens
+    if _max_tokens is None:
+        _max_tokens = get_configured_max_tokens()
+    if _max_tokens is not None and _max_tokens > 0:
+        request_params["max_tokens"] = _max_tokens
 
     # 千问 VL 特定配置
     is_qwen_vl_model = model_config.model_family == "qwen2.5-vl"
@@ -372,156 +379,148 @@ def call_ai(
 
     logger.info(f"Sending request to {model_config.model_name}")
 
-    # 重试逻辑
-    for attempt in range(1, max_attempts + 1):
+    def _wrap_error(orig: Exception, streaming: bool) -> Exception:
+        """对齐 JS service-caller:450-459: 失败时包成带模型名 + troubleshooting
+        URL 的可读错误, 而不是裸抛 OpenAI/httpx 异常."""
+        label = "streaming " if streaming else ""
+        return RuntimeError(
+            f"failed to call {label}AI model service "
+            f"({model_config.model_name}): {orig}\n"
+            f"Trouble shooting: https://midscenejs.com/model-provider.html"
+        )
+
+    # 流式调用 —— 对齐 JS: **不**包在重试循环内. 流式中途失败(已向 on_chunk
+    # 推送过部分内容)若重试, 消费者会收到重复/错乱的增量.
+    if stream and on_chunk:
+        # C10:on_chunk 接受 dict(CodeGenerationChunk 形态), 而非裸 str —— 让
+        # 消费者能识别增量、最终帧、usage. 兼容旧的 on_chunk(str) 签名.
+        accumulated = ""
+        accumulated_reasoning = ""
+        usage = None
+
+        def _emit(payload: dict[str, Any]) -> None:
+            try:
+                on_chunk(payload)  # type: ignore[arg-type]
+            except TypeError:
+                # Fallback for legacy signature `on_chunk(str)`
+                on_chunk(payload.get("content", ""))  # type: ignore[arg-type]
+
         try:
-            if stream and on_chunk:
-                # 流式调用.C10:on_chunk 接受 dict(CodeGenerationChunk 形态),
-                # 而非裸 str —— 让消费者能识别增量、最终帧、usage.
-                # 为保向后兼容,若 on_chunk 只接受一个位置参数且不是 dict,
-                # 仍然可以传 str(见下面的兼容包装).
-                accumulated = ""
-                accumulated_reasoning = ""
-                usage = None
+            response_stream = create_completion(**request_params, stream=True)
 
-                def _emit(payload: dict[str, Any]) -> None:
-                    """
-                    Emit a chunk to ``on_chunk``, picking the signature it accepts.
-
-                    New consumers: ``on_chunk(chunk_dict)`` with fields
-                    ``content / accumulated / reasoning_content / isComplete / usage``.
-                    Legacy consumers: ``on_chunk(str)`` — we pass ``content`` only.
-                    """
-                    try:
-                        on_chunk(payload)  # type: ignore[arg-type]
-                    except TypeError:
-                        # Fallback for legacy signature `on_chunk(str)`
-                        on_chunk(payload.get("content", ""))  # type: ignore[arg-type]
-
-                response_stream = create_completion(
-                    **request_params,
-                    stream=True
-                )
-
-                for chunk in response_stream:
-                    if chunk.choices and len(chunk.choices) > 0:
-                        delta = chunk.choices[0].delta
-                        reasoning_content = getattr(delta, "reasoning_content", None)
+            for chunk in response_stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    reasoning_content = getattr(delta, "reasoning_content", None)
+                    # 对齐 JS: content 或 reasoning_content 任一非空就推送增量,
+                    # 这样 reasoning-only 的思考增量也能流给消费者.
+                    if delta.content or reasoning_content:
                         if delta.content:
                             accumulated += delta.content
-                            _emit({
-                                "content": delta.content,
-                                "accumulated": accumulated,
-                                "reasoning_content": reasoning_content or "",
-                                "isComplete": False,
-                                "usage": None,
-                            })
-
                         if reasoning_content:
                             accumulated_reasoning += reasoning_content
+                        _emit({
+                            "content": delta.content or "",
+                            "accumulated": accumulated,
+                            "reasoning_content": reasoning_content or "",
+                            "isComplete": False,
+                            "usage": None,
+                        })
 
-                        if hasattr(chunk, 'usage') and chunk.usage:
-                            usage = chunk.usage
+                    if hasattr(chunk, 'usage') and chunk.usage:
+                        usage = chunk.usage
 
-                time_cost = (time.time() - start_time) * 1000
+            time_cost = (time.time() - start_time) * 1000
 
-                # C10: 合成最终帧 —— 对齐 JS `service-caller/index.ts:336-362`.
-                # 若 provider 没给 usage,按 `len(content)/4` 估算 prompt/completion
-                # tokens(JS 同样做法),下游 token 统计不会看到 None.
-                final_usage_info = None
-                if usage is not None:
-                    final_usage_info = build_usage_info(
-                        usage, time_cost, model_config
-                    )
-                else:
-                    estimated_completion = max(len(accumulated) // 4, 1)
-                    # prompt_tokens 估算太不准,留 None,仅给 completion 估算
-                    final_usage_info = AIUsageInfo(
-                        prompt_tokens=None,
-                        completion_tokens=estimated_completion,
-                        total_tokens=estimated_completion,
-                        cached_input=None,
-                        time_cost=time_cost,
-                        model_name=model_config.model_name,
-                        model_description=model_config.model_description,
-                        intent=model_config.intent,
-                    )
-
-                _emit({
-                    "content": "",
-                    "accumulated": accumulated,
-                    "reasoning_content": accumulated_reasoning,
-                    "isComplete": True,
-                    "usage": final_usage_info,
-                })
-
-                return {
-                    "content": accumulated,
-                    "reasoning_content": accumulated_reasoning or None,
-                    "usage": final_usage_info,
-                    "isStreamed": True,
-                }
-
+            # 合成最终帧 —— 对齐 JS. 无 usage 时按 len(content)/4 估算
+            # prompt=completion, total=estimated*2(与 JS 一致).
+            if usage is not None:
+                final_usage_info = build_usage_info(usage, time_cost, model_config)
             else:
-                # 非流式调用
-                response = cast(ChatCompletion, create_completion(**request_params))
-
-                time_cost = (time.time() - start_time) * 1000
-
-                # 提取响应内容
-                if not response.choices:
-                    raise ValueError(
-                        f"Invalid response from LLM service: {response}"
-                    )
-
-                content = response.choices[0].message.content
-                if not content:
-                    raise ValueError("empty content from AI model")
-
-                reasoning_content = getattr(
-                    response.choices[0].message,
-                    "reasoning_content",
-                    None,
+                estimated = max(len(accumulated) // 4, 1)
+                final_usage_info = AIUsageInfo(
+                    prompt_tokens=estimated,
+                    completion_tokens=estimated,
+                    total_tokens=estimated * 2,
+                    cached_input=None,
+                    time_cost=time_cost,
+                    model_name=model_config.model_name,
+                    model_description=model_config.model_description,
+                    intent=model_config.intent,
                 )
 
-                # 构建使用信息
-                usage_info = None
-                if response.usage:
-                    usage_info = build_usage_info(
-                        response.usage,
-                        time_cost,
-                        model_config
-                    )
+            _emit({
+                "content": "",
+                "accumulated": accumulated,
+                "reasoning_content": "",
+                "isComplete": True,
+                "usage": final_usage_info,
+            })
 
-                logger.info(
-                    f"Model response received: "
-                    f"model={model_config.model_name}, "
-                    f"tokens={response.usage.total_tokens if response.usage else 0}, "
-                    f"cost_ms={time_cost:.0f}"
+            return {
+                "content": accumulated,
+                "reasoning_content": accumulated_reasoning or None,
+                "usage": final_usage_info,
+                "isStreamed": True,
+            }
+        except Exception as e:
+            logger.error(f"Streaming AI call failed: {e}")
+            raise _wrap_error(e, streaming=True) from e
+
+    # 非流式调用 —— 重试循环
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = cast(ChatCompletion, create_completion(**request_params))
+
+            time_cost = (time.time() - start_time) * 1000
+
+            if not response.choices:
+                raise ValueError(
+                    f"Invalid response from LLM service: {response}"
                 )
 
-                return {
-                    "content": content,
-                    "reasoning_content": reasoning_content or None,
-                    "usage": usage_info,
-                    "isStreamed": False,
-                }
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("empty content from AI model")
+
+            reasoning_content = getattr(
+                response.choices[0].message,
+                "reasoning_content",
+                None,
+            )
+
+            usage_info = None
+            if response.usage:
+                usage_info = build_usage_info(
+                    response.usage, time_cost, model_config
+                )
+
+            logger.info(
+                f"Model response received: "
+                f"model={model_config.model_name}, "
+                f"tokens={response.usage.total_tokens if response.usage else 0}, "
+                f"cost_ms={time_cost:.0f}"
+            )
+
+            return {
+                "content": content,
+                "reasoning_content": reasoning_content or None,
+                "usage": usage_info,
+                "isStreamed": False,
+            }
 
         except Exception as e:
-            last_error = e
             logger.error(
                 f"Attempt {attempt}/{max_attempts} failed: {str(e)}"
             )
 
             if attempt < max_attempts:
-                # 等待后重试
                 retry_delay = model_config.retry_interval / 1000
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
             else:
-                # 所有重试都失败
                 logger.error(f"All {max_attempts} attempts failed")
-                raise last_error from e
+                raise _wrap_error(e, streaming=False) from e
 
     # 不应该到达这里，但为了类型检查
     raise RuntimeError("Unexpected error in call_ai")

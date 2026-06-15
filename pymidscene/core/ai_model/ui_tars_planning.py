@@ -18,12 +18,12 @@ The start_box / end_box arg is either a JSON-like "[x, y]" normalized pair
 
 from __future__ import annotations
 
-import json
 import math
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from ...shared.logger import logger
+from ...shared.utils import js_round
 
 
 # --- Constants ---------------------------------------------------------------
@@ -31,6 +31,77 @@ from ...shared.logger import logger
 # Small padding around the clicked point — matches JS `bboxSize = 10`.
 # Produces a 10x10 bbox centered on the click point for cache/report purposes.
 _POINT_BBOX_SIZE = 10
+
+# UI-TARS box coordinates are integers on a 0-1000 grid. The JS pipeline runs
+# the model output through @ui-tars/action-parser with factor:[1000,1000],
+# which divides every box number by 1000 to get a normalized 0-1 value before
+# multiplying by screen size. Python must do the same division.
+_UI_TARS_COORD_FACTOR = 1000.0
+
+# Hotkey alias map — ports the relevant subset of JS `us-keyboard-layout`
+# keyMap / transformHotkeyInput so UI-TARS combos like "ctrl c" / "page down"
+# become Playwright/driver-recognised key names ("Control+c", "PageDown").
+_UI_TARS_KEY_ALIASES = {
+    "ctrl": "Control",
+    "control": "Control",
+    "cmd": "Meta",
+    "command": "Meta",
+    "meta": "Meta",
+    "win": "Meta",
+    "super": "Meta",
+    "alt": "Alt",
+    "option": "Alt",
+    "shift": "Shift",
+    "enter": "Enter",
+    "return": "Enter",
+    "esc": "Escape",
+    "escape": "Escape",
+    "del": "Delete",
+    "delete": "Delete",
+    "backspace": "Backspace",
+    "tab": "Tab",
+    "space": "Space",
+    "spacebar": "Space",
+    "up": "ArrowUp",
+    "down": "ArrowDown",
+    "left": "ArrowLeft",
+    "right": "ArrowRight",
+    "arrowup": "ArrowUp",
+    "arrowdown": "ArrowDown",
+    "arrowleft": "ArrowLeft",
+    "arrowright": "ArrowRight",
+    "pageup": "PageUp",
+    "pagedown": "PageDown",
+    "page up": "PageUp",
+    "page down": "PageDown",
+    "home": "Home",
+    "end": "End",
+}
+
+
+def _normalize_hotkey(key: str) -> str:
+    """
+    Port of JS `transformHotkeyInput` (us-keyboard-layout): if the whole
+    string is a known alias use it directly, else split on spaces and map each
+    token, joining with '+'. UI-TARS emits space-separated combos.
+    """
+    raw = (key or "").strip()
+    if not raw:
+        return raw
+    whole = raw.lower()
+    if whole in _UI_TARS_KEY_ALIASES:
+        return _UI_TARS_KEY_ALIASES[whole]
+    tokens = [t for t in re.split(r"[\s+]+", raw) if t]
+    out = []
+    for tok in tokens:
+        lower = tok.lower()
+        if lower in _UI_TARS_KEY_ALIASES:
+            out.append(_UI_TARS_KEY_ALIASES[lower])
+        elif len(tok) == 1:
+            out.append(tok.lower() if len(tokens) > 1 else tok)
+        else:
+            out.append(tok[0].upper() + tok[1:])
+    return "+".join(out)
 
 
 # --- Text preprocessing ------------------------------------------------------
@@ -65,46 +136,35 @@ def _parse_start_box(
     height: float,
 ) -> Tuple[float, float]:
     """
-    Decode a UI-TARS start_box/end_box value to pixel (x, y).
+    Decode a UI-TARS start_box/end_box value to pixel (x, y), faithfully
+    replicating @ui-tars/action-parser + getPoint:
 
-    Two forms are accepted:
-    - JSON "[x, y]" with x,y normalized to 0-1 → multiplied by size.
-    - "(cx,cy)" (produced by `convert_bbox_to_coordinates`) → used as-is.
+    1. Strip ``()[]`` brackets and split into numbers.
+    2. Divide EVERY number by 1000 (the model emits a 0-1000 grid, never 0-1).
+    3. The click point is the FIRST PAIR × screen size — i.e. ``getPoint`` uses
+       ``const [x,y] = JSON.parse(startBox)``, the first two normalized values.
+       For a real 4-number box that is the top-left corner (JS behaviour); for a
+       point or an inline ``<bbox>`` (already collapsed to its center before
+       parsing) the first pair IS the intended point.
 
-    JSON-style with values > 1 is also tolerated (taken as already-pixel coords).
+    NOTE: the old `if 0<=x<=1` heuristic never fired for real input (0-1000
+    integers) and silently skipped the /1000, putting clicks off by ~1000x.
     """
     text = (start_box or "").strip()
     if not text:
         raise ValueError("start_box is empty")
 
-    # (cx, cy) pixel-center form — output of bbox→center rewrite.
-    if text.startswith("(") and text.endswith(")"):
-        inner = text[1:-1]
-        parts = [p.strip() for p in inner.split(",") if p.strip()]
-        if len(parts) >= 2:
-            return float(parts[0]), float(parts[1])
+    cleaned = re.sub(r"[()\[\]]", "", text)
+    raw_tokens = [t for t in re.split(r"[,\s]+", cleaned) if t]
+    if len(raw_tokens) < 2:
+        raise ValueError(f"start_box must have >=2 numbers, got {text!r}")
 
-    # JSON array "[x, y]" or "[x1, y1, x2, y2]" form.
     try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError) as exc:
+        norm = [float(t) / _UI_TARS_COORD_FACTOR for t in raw_tokens]
+    except ValueError as exc:
         raise ValueError(f"unrecognised start_box format: {text!r}") from exc
 
-    if not isinstance(parsed, list) or len(parsed) < 2:
-        raise ValueError(f"start_box must be a list of >=2 numbers, got {parsed!r}")
-
-    # 4-value bbox → take its center
-    if len(parsed) >= 4:
-        x = (float(parsed[0]) + float(parsed[2])) / 2
-        y = (float(parsed[1]) + float(parsed[3])) / 2
-    else:
-        x = float(parsed[0])
-        y = float(parsed[1])
-
-    # Values in 0-1 are normalized; otherwise already pixels.
-    if 0 <= x <= 1 and 0 <= y <= 1:
-        return x * width, y * height
-    return x, y
+    return norm[0] * width, norm[1] * height
 
 
 def _point_to_bbox(
@@ -116,39 +176,39 @@ def _point_to_bbox(
     """10x10 clamped bbox around (x,y). Mirrors JS `pointToBbox` (ui-tars-planning.ts:29-40)."""
     half = _POINT_BBOX_SIZE / 2
     return (
-        int(round(max(x - half, 0))),
-        int(round(max(y - half, 0))),
-        int(round(min(x + half, width))),
-        int(round(min(y + half, height))),
+        js_round(max(x - half, 0)),
+        js_round(max(y - half, 0)),
+        js_round(min(x + half, width)),
+        js_round(min(y + half, height)),
     )
 
 
 # --- Action parser -----------------------------------------------------------
 
-# Matches: `action_name(key1='value1', key2='value2', ...)`
-# The value capture handles single-quoted strings with escaped quotes/backslashes;
-# JS source explicitly permits `\'`, `\"`, `\n` escapes in type/finished content.
-_ACTION_LINE_RE = re.compile(
-    r"Action:\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*?)\)\s*(?=(?:\nThought:|\nAction:|$))",
-    re.DOTALL,
-)
+# Single thought per response — JS `Thought: ([\s\S]+?)(?=\s*Action[:：]|$)`.
+# Note the FULLWIDTH colon `：` (U+FF1A) is accepted alongside ASCII `:`.
+_THOUGHT_RE = re.compile(r"Thought:\s*([\s\S]+?)(?=\s*Action[:：]|$)")
 
-# key='value' — value is everything up to the next unescaped single quote.
+# A single action chunk: `action_name(args...)`.
+_FUNC_CALL_RE = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_]*)\((.*)\)$", re.DOTALL)
+
+# key='value' / key="value" — value is everything up to the matching quote.
 _KV_RE = re.compile(
-    r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*'((?:\\.|[^'\\])*)'"
+    r"([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"
+    r"(?:'((?:\\.|[^'\\])*)'|\"((?:\\.|[^\"\\])*)\")"
 )
 
 
 def _parse_kwargs(args_text: str) -> Dict[str, str]:
     """
-    Parse `key='value', key2='value2'` argument list, honoring `\\'` `\\"` `\\n` escapes.
+    Parse `key='value', key2="value2"` argument list, honoring `\\'` `\\"` `\\n` escapes.
 
     Values come back with escapes materialised (`\\n` → actual newline).
     """
     out: Dict[str, str] = {}
     for match in _KV_RE.finditer(args_text):
         key = match.group(1)
-        raw = match.group(2)
+        raw = match.group(2) if match.group(2) is not None else match.group(3)
         # Materialise \\n / \\' / \\" / \\\\
         value = (
             raw.replace("\\n", "\n")
@@ -171,49 +231,40 @@ def parse_ui_tars_response(text: str) -> List[Dict[str, Any]]:
             "thought": Optional[str],
         }
 
-    Supports repeated Action: lines sharing the preceding Thought:. Reflection:
-    blocks should already be stripped by `get_summary` before reaching here,
-    but we tolerate them gracefully.
+    Mirrors JS `parseActionVlm` ('bc' mode, @ui-tars/action-parser:86-130):
+    - ONE thought (first `Thought:` block) is shared by every action.
+    - Everything after the LAST `Action:`/`Action：` token is the action body;
+      it is split on blank lines into multiple chunks, EACH parsed as a bare
+      `name(args)` call (no per-chunk `Action:` prefix required). So
+      ``Action: click(...)\n\nright_single(...)`` yields TWO actions.
     """
     results: List[Dict[str, Any]] = []
+    text = (text or "").strip()
 
-    # Split by "Thought:" anchors; first element before any Thought: is scanned
-    # for orphan Action: lines (rare but observed in some model outputs).
-    sections = re.split(r"(?:^|\n)Thought:", text)
+    thought_match = _THOUGHT_RE.search(text)
+    thought = thought_match.group(1).strip() if thought_match else None
 
-    if sections and sections[0].strip():
-        # Orphan Action: lines without a preceding Thought.
-        for match in _ACTION_LINE_RE.finditer("\n" + sections[0]):
-            action_name = match.group(1).lower()
-            kwargs = _parse_kwargs(match.group(2))
-            results.append({
-                "action_type": action_name,
-                "action_inputs": kwargs,
-                "thought": None,
-            })
+    # Isolate the action body: tail after the LAST Action:/Action：, else whole.
+    if "Action:" in text or "Action：" in text:
+        action_str = re.split(r"Action[:：]", text)[-1]
+    else:
+        action_str = text
 
-    for section in sections[1:]:
-        # section now starts with the thought text followed by Action: line(s)
-        # Split thought vs. action block at the first "\nAction:" (or end).
-        action_match = re.search(r"\nAction:", section)
-        if action_match:
-            thought = section[: action_match.start()].strip()
-            action_block = section[action_match.start():]
-        else:
-            thought = section.strip()
-            action_block = ""
-
-        if not action_block:
+    # Split into chunks on blank lines, parse each as a bare function call.
+    for raw_chunk in re.split(r"\n\s*\n", action_str):
+        chunk = raw_chunk.strip()
+        if not chunk:
             continue
-
-        for match in _ACTION_LINE_RE.finditer(action_block):
-            action_name = match.group(1).lower()
-            kwargs = _parse_kwargs(match.group(2))
-            results.append({
-                "action_type": action_name,
-                "action_inputs": kwargs,
-                "thought": thought or None,
-            })
+        call = _FUNC_CALL_RE.match(chunk)
+        if not call:
+            continue
+        action_name = call.group(1).lower()
+        kwargs = _parse_kwargs(call.group(2))
+        results.append({
+            "action_type": action_name,
+            "action_inputs": kwargs,
+            "thought": thought,
+        })
 
     return results
 
@@ -305,9 +356,10 @@ def transform_ui_tars_actions(
                 if not key:
                     logger.warning("UI-TARS hotkey action missing key; skipping")
                     continue
-                # Normalise: UI-TARS uses space-separated key combos in some versions,
-                # but the canonical form is `+` — pass through directly.
-                normalised = "+".join(part for part in re.split(r"[\s+]+", key) if part)
+                # Map key names through the alias table (ctrl->Control,
+                # 'page down'->PageDown) like JS transformHotkeyInput, so the
+                # driver recognises them regardless of platform.
+                normalised = _normalize_hotkey(key)
                 actions_out.append({
                     "type": "KeyboardPress",
                     "param": {"keyName": normalised},

@@ -34,6 +34,7 @@ from ...shared.utils import (
 from ...shared.env import (
     ModelConfigManager,
     ModelConfig,
+    get_configured_max_tokens,
     get_global_model_config_manager,
     INTENT_DEFAULT,
     INTENT_INSIGHT,
@@ -142,6 +143,26 @@ class Agent:
     def _get_model_config(self, intent: str = INTENT_DEFAULT) -> ModelConfig:
         """获取模型配置"""
         return self.model_config_manager.get_model_config(intent)
+
+    def _resolve_model_family(self, config: ModelConfig) -> str:
+        """
+        解析坐标适配用的 model_family。
+
+        显式配置优先；未配置时从模型名推断 —— 关键修复 qwen3-vl(归一化
+        0-1000 坐标)用户没设 family 标志时被当成 qwen2.5-vl(像素坐标)而
+        每次点击错位。
+
+        注意：pymidscene 以 Qwen-VL(qwen2.5 系列, 像素坐标)为主要目标，
+        未显式配置 family 且名字也无法识别时默认 qwen2.5-vl。这与 JS 的
+        "未配置→normalized-0-1000" 默认有意不同：JS 默认会让最常见的
+        qwen-vl-max 路径坐标错位。
+        """
+        if config.model_family:
+            return config.model_family
+        name = (config.model_name or "").lower()
+        if "qwen3" in name or name.startswith("qwen-vl-3"):
+            return "qwen3-vl"
+        return "qwen2.5-vl"
 
     async def _capture_ai_screenshot(self) -> Tuple[str, Size]:
         """
@@ -321,9 +342,12 @@ class Agent:
             f"base_url={base_url or 'default'}"
         )
 
+        # Anthropic 的 max_tokens 是必填参数, 不能省略. 用配置值, 未配置时
+        # 用一个较大的默认(8192)而非 4096, 避免截断大响应.
+        _anthropic_max_tokens = get_configured_max_tokens() or 8192
         response = client.messages.create(
             model=config.model_name,
-            max_tokens=4096,
+            max_tokens=_anthropic_max_tokens,
             system=system_text if system_text else anthropic.NOT_GIVEN,
             messages=anthropic_messages,
         )
@@ -545,11 +569,16 @@ class Agent:
         }
 
         # 构造请求体
-        data = {
+        data: dict[str, Any] = {
             "model": config.model_name,
             "messages": messages,
-            "max_tokens": 4096,
         }
+        # 对齐 JS: 仅在配置了 MIDSCENE_MODEL_MAX_TOKENS / OPENAI_MAX_TOKENS 时
+        # 才发送 max_tokens; 否则省略, 由 provider 用其默认(较大)上限, 避免
+        # 把大响应硬截断成 4096 → 不完整 JSON → 解析失败.
+        _max_tokens = get_configured_max_tokens()
+        if _max_tokens is not None:
+            data["max_tokens"] = _max_tokens
 
         # temperature 仅在非零时设置（有些 API 不支持）
         if config.temperature is not None and config.temperature > 0:
@@ -772,7 +801,7 @@ class Agent:
 
         # 获取模型配置
         config = self._get_model_config(INTENT_INSIGHT)
-        model_family = config.model_family or "qwen2.5-vl"
+        model_family = self._resolve_model_family(config)
 
         # 准备消息
         messages = self._build_messages(
@@ -832,7 +861,7 @@ class Agent:
             return None
 
         # 根据模型类型适配 bbox 坐标（关键：doubao 返回的是归一化 0-1000 坐标）
-        model_family = config.model_family or "qwen2.5-vl"
+        model_family = self._resolve_model_family(config)
         img_width = int(size.get('width', 1280))
         img_height = int(size.get('height', 800))
         
@@ -2440,7 +2469,9 @@ class Agent:
                 logger.warning("Interface does not support reload")
                 return False
 
-            elif action_upper in ("GoBack", "goBack", "Back", "back"):
+            elif action_upper in (
+                "GoBack", "goBack", "Back", "back", "AndroidBackButton"
+            ):
                 if hasattr(self.interface, "go_back"):
                     await self.interface.go_back()
                     return True
@@ -2450,6 +2481,14 @@ class Agent:
                     return True
                 await self.interface.evaluate_javascript("window.history.back()")
                 await asyncio.sleep(0.3)
+                return True
+
+            elif action_upper in ("Home", "home", "AndroidHomeButton"):
+                # Android/iOS have home(); web has no home concept (no-op).
+                if hasattr(self.interface, "home"):
+                    await self.interface.home()
+                    return True
+                logger.debug("Interface does not support Home; treating as no-op")
                 return True
 
             else:

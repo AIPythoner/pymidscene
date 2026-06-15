@@ -18,8 +18,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
+from ....shared.utils import js_round
 
-AUTO_GLM_COORDINATE_MAX = 999
+
+# 对齐 JS auto-glm/actions.ts:10 (AUTO_GLM_COORDINATE_MAX=1000) 与
+# common.ts normalized01000 (除以字面量 1000). 用 999 会让每个坐标/距离
+# 放大 1000/999 ≈ 1.001 倍.
+AUTO_GLM_COORDINATE_MAX = 1000
 _POINT_BBOX_SIZE = 10
 
 
@@ -71,28 +76,39 @@ def _swipe_to_scroll(
     end: List[int],
     width: float,
     height: float,
+    think: str,
 ) -> Dict[str, Any]:
     """
-    Classify a Swipe by dominant axis and convert to a Scroll action.
+    Classify a Swipe by dominant axis and convert to a Scroll param.
 
-    Drag direction semantics on touch: finger moves from start → end, so the
-    CONTENT moves in the opposite direction. But both JS and this port expose
-    the geometric drag direction (start→end) as the `direction` field and
-    let the web layer invert if needed; web `scroll()` takes a direction and
-    a distance, where `direction=down` scrolls CONTENT up (= finger moves up).
-    We match the JS convention here.
+    Exactly mirrors JS auto-glm/actions.ts:230-288:
+    - delta is computed in the 0-1000 grid; the dominant axis is chosen by
+      ``absDeltaY > absDeltaX`` (vertical wins ties-to-vertical).
+    - ``direction`` is the direction the page CONTENT moves:
+      finger moves down (deltaY>0) => content reveals above => 'up'
+      finger moves up   (deltaY<0) => content reveals below => 'down'
+      (and left/right symmetrically). The OLD port had both axes inverted.
+    - distance = round(abs(delta) * size / 1000); NO 50px floor (the floor made
+      short swipes over-scroll up to 2.5x).
+    - a ``locate`` is attached from the swipe START so the scroll originates at
+      the swiped element/inner container, not the whole viewport.
     """
-    dx = (end[0] - start[0]) * width / AUTO_GLM_COORDINATE_MAX
-    dy = (end[1] - start[1]) * height / AUTO_GLM_COORDINATE_MAX
-    if abs(dx) > abs(dy):
-        direction = "right" if dx > 0 else "left"
-        distance = int(abs(dx))
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    abs_dx = abs(delta_x)
+    abs_dy = abs(delta_y)
+
+    if abs_dy > abs_dx:
+        distance = js_round(abs_dy * height / AUTO_GLM_COORDINATE_MAX)
+        direction = "up" if delta_y > 0 else "down"
     else:
-        direction = "down" if dy > 0 else "up"
-        distance = int(abs(dy))
+        distance = js_round(abs_dx * width / AUTO_GLM_COORDINATE_MAX)
+        direction = "left" if delta_x > 0 else "right"
+
     return {
+        "locate": _locate_for_point(start[0], start[1], width, height, think),
         "direction": direction,
-        "distance": max(distance, 50),
+        "distance": distance,
         "scrollType": "singleAction",
     }
 
@@ -114,10 +130,14 @@ def transform_auto_glm_action(
     think = parsed.get("think", "") or ""
 
     if metadata == "finish":
+        # JS auto-glm finish puts the completion MESSAGE in `thought` with an
+        # empty param. We keep param.content too (the executor's Finished
+        # handler logs it), but use the message as the thought to match JS.
+        message = parsed.get("message", "")
         return [{
             "type": "Finished",
-            "param": {"content": parsed.get("message", "")},
-            "thought": think,
+            "param": {"content": message},
+            "thought": message or think,
         }]
 
     if metadata != "do":
@@ -161,6 +181,7 @@ def transform_auto_glm_action(
                 parsed.get("end") or [0, 0],
                 width,
                 height,
+                think,
             ),
             "thought": think,
         }]
@@ -173,19 +194,22 @@ def transform_auto_glm_action(
         }]
 
     if action == "Back":
-        # Best-effort on web: history.back() via evaluate_javascript.
+        # auto-glm is Android-oriented (JS -> AndroidBackButton). Emit a
+        # device-agnostic Back: the executor routes it to interface.back()
+        # (Android) / go_back() and falls back to history.back() on web.
         return [{
-            "type": "EvaluateJavaScript",
-            "param": {"script": "window.history.back();"},
+            "type": "Back",
+            "param": {},
             "thought": think,
         }]
 
     if action == "Home":
-        # Not applicable on web; emit a Sleep so the plan doesn't explode.
+        # JS -> AndroidHomeButton. Emit a Home action; the executor routes it
+        # to interface.home() (Android/iOS) and no-ops on web.
         return [{
-            "type": "Sleep",
-            "param": {"timeMs": 100},
-            "thought": f"[Home unsupported on web] {think}",
+            "type": "Home",
+            "param": {},
+            "thought": think,
         }]
 
     if action == "Launch":

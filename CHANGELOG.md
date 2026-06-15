@@ -2,7 +2,44 @@
 
 ## [Unreleased]
 
-## [0.3.4] - 2026-06-11
+## [0.3.5] - 2026-06-16
+
+第五轮审查:首次系统性对照 JS 审查此前未覆盖的 model / coordinate / prompt /
+parser 层（坐标适配、AI service caller、UI-TARS 与 auto-GLM 解析器、prompts、
+Doubao/Qwen 模型）。29 条经对抗验证确认的发现, 修复如下。
+
+### Fixed
+
+**坐标（每个 misclick 一类模型家族 → 最高优先级）:**
+
+- **UI-TARS 坐标 off-by-1000**: `_parse_start_box` 此前对 0-1000 网格坐标不除以 1000(旧的 `if 0<=x<=1` 启发式对真实整数输入永不触发), 每个 UI-TARS Tap/DoubleClick/RightClick/Drag 点都偏离约 1000 倍。现严格复刻 `@ui-tars/action-parser` + `getPoint`: 所有 box 数字除以 1000、取前两个 × 屏幕尺寸; 内联 `<bbox>` 路径同样修正
+- **所有 bbox 适配器改用 round-half-up**(`js_round`, 对齐 JS `Math.round`): Python 内置 `round` 是 banker's rounding, 在奇数宽视口上每个落在 .5 的坐标都与 JS 差 1px
+- **未配置 model_family 时按模型名推断**: qwen3-vl(归一化 0-1000)用户没设 family 标志时此前被当成 qwen2.5-vl(像素)、每次点击错位; 现 qwen3 名字 → qwen3-vl(保留 Qwen-first 的 qwen2.5-vl 默认)
+- Doubao 字符串数组项(如 `["940 445 969 490"]`)现只取前两个数字(对齐 JS, 当中心点处理), 而非展开成 4-值矩形; 8-角分支键于原始输入长度
+- `adapt_bbox_to_rect` / `format_bbox` 保证宽高至少为 1(对齐 JS `adaptBboxToRect`), 退化的零面积 bbox(元素定位成一点)不再产生 width/height==0
+
+**auto-GLM:**
+
+- **Swipe→Scroll 方向此前两轴都与 JS 相反**(手指上滑本应"内容下移"却给出相反方向): 现 `absDeltaY>absDeltaX` 判主轴, `deltaY>0→up / deltaX>0→left`, 与 JS 一致
+- Swipe 距离改用 round 且去掉 50px 下限(短滑动此前最多过冲 2.5 倍); 并附带从起点算的 `locate`, 使滚动从被滑动的元素/内部容器开始而非整个视口
+- `AUTO_GLM_COORDINATE_MAX` 999 → 1000(对齐 JS 除以 1000); Back/Home 改发设备无关动作(执行器路由到原生 back/home, web 回落 history.back)
+- 完整移植 JS 的中文 plan prompt(19 条规则)与两个 locate prompt; 此前被大幅截断
+
+**UI-TARS 解析:**
+
+- 多动作解析对齐 JS: 取最后一个 `Action:`/`Action：`(支持全角冒号)之后的内容、按空行切分多个动作块、每块不再要求 `Action:` 前缀; 单个 thought 共享给所有动作
+- hotkey 键名经别名表归一化(`ctrl c`→`Control+c`, `page down`→`PageDown`), 而非原样透传
+
+**AI service caller:**
+
+- **max_tokens 此前硬编码 4096** 且 `MIDSCENE_MODEL_MAX_TOKENS` / `OPENAI_MAX_TOKENS` 从不读取 → 默认把大响应截断成不完整 JSON 解析失败。现读取这两个环境变量, 未配置时省略该字段(OpenAI 兼容路径)由 provider 用其默认上限; Anthropic 必填路径未配置时用 8192
+- 流式调用移出重试循环(对齐 JS): 流式中途失败重试会向消费者重复推送增量
+- 失败统一包成带模型名 + troubleshooting URL 的错误(对齐 JS), 不再裸抛 OpenAI/httpx 异常; 流式现在也对 reasoning-only 增量推送 chunk
+
+### Notes（确认存在但有意不改）
+
+- planner prompt 用 JSON 批量动作而非 JS 的 XML 单动作契约: Python 的 prompt+parser 内部自洽, 重写为 XML 契约是大规模架构改动, 暂保留
+- UI-TARS `type` content 的 `\n` 仍materialize为真实换行(JS 保留字面 `\n`): Python 行为对实际输入更合理
 
 第四轮审查收尾:报告元素详情面板、报告体积、LongPress 动作链路、Android 启动/截图健壮性。
 

@@ -61,7 +61,7 @@ class QwenVLModel(BaseAIModel):
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_tokens: "int | None" = None,
         model_family: Optional[str] = None,
         **kwargs
     ):
