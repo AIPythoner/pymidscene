@@ -150,3 +150,12 @@ class TestRunDir:
         monkeypatch.delenv("MIDSCENE_RUN_DIR", raising=False)
         mgr = MidsceneRunManager(base_dir=str(tmp_path))
         assert mgr.run_dir == tmp_path / "midscene_run"
+
+    def test_singleton_not_thrashed_by_trailing_slash(self, tmp_path):
+        from pymidscene.core import run_manager as rm
+        rm._default_manager = None
+        a = rm.get_default_run_manager(base_dir=str(tmp_path))
+        # same dir with a trailing slash must return the SAME cached instance
+        b = rm.get_default_run_manager(base_dir=str(tmp_path) + "/")
+        assert a is b
+

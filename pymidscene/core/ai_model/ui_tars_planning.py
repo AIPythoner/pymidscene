@@ -309,21 +309,21 @@ def transform_ui_tars_actions(
                 locate = _locate_from_box(inputs["start_box"])
                 actions_out.append({
                     "type": "Tap",
-                    "param": {"locate": locate, "prompt": thought},
+                    "param": {"locate": locate},
                     "thought": thought,
                 })
             elif atype == "left_double":
                 locate = _locate_from_box(inputs["start_box"])
                 actions_out.append({
                     "type": "DoubleClick",
-                    "param": {"locate": locate, "prompt": thought},
+                    "param": {"locate": locate},
                     "thought": thought,
                 })
             elif atype == "right_single":
                 locate = _locate_from_box(inputs["start_box"])
                 actions_out.append({
                     "type": "RightClick",
-                    "param": {"locate": locate, "prompt": thought},
+                    "param": {"locate": locate},
                     "thought": thought,
                 })
             elif atype == "drag":
@@ -335,19 +335,23 @@ def transform_ui_tars_actions(
                     "thought": thought,
                 })
             elif atype == "type":
+                # 不放 prompt: UI-TARS type 依赖前一步 click 已聚焦, 直接往
+                # 焦点元素输入(对齐 JS param={value})。放了 prompt 会让执行器
+                # 把模型的 thought 当元素描述去 ai_locate, 浪费且常失败。
                 actions_out.append({
                     "type": "Input",
-                    "param": {"value": inputs.get("content", ""), "prompt": thought},
+                    "param": {"value": inputs.get("content", "")},
                     "thought": thought,
                 })
             elif atype == "scroll":
+                # 不放 prompt: 对齐 JS param={direction}, 滚整个视口。放了
+                # prompt 会让执行器对 thought 做一次多余的 ai_locate。
                 direction = inputs.get("direction", "down")
                 actions_out.append({
                     "type": "Scroll",
                     "param": {
                         "direction": direction,
                         "scrollType": "singleAction",
-                        "prompt": thought,
                     },
                     "thought": thought,
                 })

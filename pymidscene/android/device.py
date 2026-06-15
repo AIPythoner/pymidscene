@@ -308,9 +308,13 @@ class AndroidDevice(AbstractInterface):
             # (见 adbutils._utils.adb_path); 显式传入的选项优先于已有环境.
             os.environ["ADBUTILS_ADB_PATH"] = adb_path
 
-        if adb_host:
+        # host 或 port 任一显式给出就建自定义 AdbClient —— 此前只设 port
+        # (不设 host)时整个分支被跳过, port 被静默忽略. JS 把 host/port
+        # 独立传入, 这里只设 port 时 host 回落到本机.
+        if adb_host or adb_port:
+            host = adb_host or "127.0.0.1"
             port = int(adb_port) if adb_port else 5037
-            self._adb_client = adbutils.AdbClient(host=adb_host, port=port)
+            self._adb_client = adbutils.AdbClient(host=host, port=port)
         else:
             self._adb_client = adbutils.adb
 
@@ -984,15 +988,15 @@ class AndroidDevice(AbstractInterface):
 
     async def clear_input(self) -> None:
         """
-        清空当前焦点输入框. 对齐 JS `clearInput`.
+        清空当前焦点输入框. 对齐 JS appium-adb `clearTextField`.
 
-        策略: KEYCODE_MOVE_END 移到末尾, 然后批量 DEL.
+        策略: 不移动光标, 直接交替发 DEL(67, 删光标左侧)+ FORWARD_DEL(112,
+        删光标右侧)各 100 次. 此前先 MOVE_END 再批量 DEL, 在多行输入框里
+        MOVE_END 只到当前行尾, 行后文本删不掉.
         """
-        # 光标移到末尾: KEYCODE_MOVE_END (123)
-        await self.shell(f"input{self._display_arg()} keyevent 123")
-        # 批量删除
-        dels = " ".join(["67"] * 100)
-        await self.shell(f"input{self._display_arg()} keyevent {dels}")
+        # 交替 backward/forward delete, 覆盖光标两侧, 与行无关
+        keys = " ".join(["67", "112"] * 100)
+        await self.shell(f"input{self._display_arg()} keyevent {keys}")
 
     async def hide_keyboard(self, timeout_ms: int = 1000) -> bool:
         """对齐 JS `hideKeyboard`. 失败返回 False."""

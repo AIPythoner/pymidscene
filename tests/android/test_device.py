@@ -300,9 +300,9 @@ class TestKeyboardAndInput:
         await android_device.connect()
         await android_device.input_text("abc", x=10, y=20, clear_first=True)
         joined = " | ".join(fake_adb_device.shell_calls)
-        # 先 tap, 再 move_end (123), 再批量 del (67), 再 input text
-        assert "keyevent 123" in joined
+        # 先 tap, 再交替 backward/forward delete (67/112), 再 input text
         assert "keyevent 67" in joined
+        assert "112" in joined
         assert "input text" in joined
 
     async def test_clear_input_standalone(
@@ -311,8 +311,11 @@ class TestKeyboardAndInput:
         await android_device.connect()
         await android_device.clear_input()
         joined = " | ".join(fake_adb_device.shell_calls)
-        assert "keyevent 123" in joined
-        assert "keyevent 67" in joined
+        # 交替 DEL(67) + FORWARD_DEL(112), 覆盖光标两侧(多行也能清干净)
+        assert "67" in joined
+        assert "112" in joined
+        # 不再先 MOVE_END(123)
+        assert "keyevent 123" not in joined
 
 
 # ------------------------------------------------------------

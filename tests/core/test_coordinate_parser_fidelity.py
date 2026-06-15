@@ -101,6 +101,35 @@ class TestUiTarsParsing:
         )
         assert out["shouldContinuePlanning"] is False
 
+    def test_type_param_has_no_prompt_key(self):
+        # `prompt:thought` would make the executor ai_locate on the reasoning
+        # text instead of typing into the focused element.
+        out = parse_ui_tars_planning(
+            "Thought: type my query\nAction: type(content='hello world')",
+            {"width": 800, "height": 600},
+        )
+        param = out["actions"][0]["param"]
+        assert param == {"value": "hello world"}
+        assert "prompt" not in param
+
+    def test_scroll_param_has_no_prompt_key(self):
+        out = parse_ui_tars_planning(
+            "Thought: scroll to find it\nAction: scroll(direction='down')",
+            {"width": 800, "height": 600},
+        )
+        param = out["actions"][0]["param"]
+        assert "prompt" not in param
+        assert param["direction"] == "down"
+
+    def test_click_param_has_no_top_level_prompt(self):
+        out = parse_ui_tars_planning(
+            "Thought: tap it\nAction: click(start_box='(500,500)')",
+            {"width": 800, "height": 600},
+        )
+        param = out["actions"][0]["param"]
+        assert "prompt" not in param  # the element is in locate.center
+        assert "center" in param["locate"]
+
 
 # --- UI-TARS hotkey normalization -------------------------------------------
 

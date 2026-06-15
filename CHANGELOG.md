@@ -2,7 +2,32 @@
 
 ## [Unreleased]
 
-## [0.3.6] - 2026-06-16
+## [0.3.7] - 2026-06-16
+
+回归/集成自审: 对前六轮重度修改的热点路径做对抗验证自审, 修掉 9 个改动引入或
+互相干扰的回归; 另清两个 Android 小 bug。
+
+### Fixed
+
+**UI-TARS 执行集成回归(第五轮改动引入):**
+
+- **UI-TARS Input / Scroll 动作此前把模型的 `thought`(推理文本)塞进 param.prompt** → 执行器把它当元素描述去 `ai_locate`/`ai_input`:
+  - type/Input: 本应往已聚焦元素直接输入, 却对推理句做一次必然失败的定位 → 输入失败 → 多余 replan
+  - scroll/Scroll: 本应滚整个视口, 却对推理句做一次多余的 ai_locate
+  现 UI-TARS 各动作 param 不再带 `prompt`(对齐 JS), Tap/DoubleClick/RightClick 用 locate.center 直点
+
+**调用/解析回归:**
+
+- **family / deepThink / vl_high_resolution 请求参数此前在 live 路径完全不生效** —— 这些只在 `service_caller.call_ai` 里整形, 而 agent 实际走 `_call_with_httpx`(从不调 call_ai)。现 `_call_with_httpx` 也应用: qwen2.5-vl 高分辨率、auto-glm 采样参数、`MIDSCENE_FORCE_DEEP_THINK` 驱动的家族 thinking 参数
+- `ai_assert` 在模型返回 JSON 数组时 `AttributeError` 崩溃(第六轮 extract_json 支持顶层数组后暴露) → 现非 dict 一律按解析失败处理
+- `_call_with_httpx` 对 `content==null`(部分 OpenAI 兼容端点的过滤/工具响应)此前让 None 流进 `safe_parse_json` 抛 `TypeError`; 现规整为 "" (与原生路径一致)
+- 规划响应 `"param": null` 此前 `.get("param", {})` 返回 None → 各执行分支 AttributeError 被吞成失败; 现统一规整为 `{}`
+- `get_default_run_manager` 单例缓存键用 `str(Path)` 与原始字符串比较, Windows / 带尾斜杠输入下反复重建单例; 改用 Path 规范化比较
+
+**Android(清理小遗留):**
+
+- 只设 `MIDSCENE_ADB_REMOTE_PORT` 不设 host 时端口此前被静默忽略; 现只给 port 时 host 回落本机
+- `clear_input` 改为交替 DEL(67)+FORWARD_DEL(112)各 100 次(对齐 appium-adb clearTextField), 此前 MOVE_END+批量 DEL 在多行输入框里清不干净行后文本
 
 第六轮审查:首次系统审查 config / 非 OpenAI 调用路径 / 支撑层(env 配置解析、
 Gemini/Anthropic 原生调用、deep_think 与家族专用参数、element_marker、

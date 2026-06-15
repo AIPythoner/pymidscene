@@ -650,6 +650,31 @@ class Agent:
         if config.temperature is not None and config.temperature > 0:
             data["temperature"] = config.temperature
 
+        # 应用家族专用 / deepThink 请求参数 —— 此前这些只在 service_caller.call_ai
+        # 里生效, 而 live 路径走的是本方法, 导致 qwen2.5-vl 高分辨率、auto-glm
+        # 采样参数、deepThink(MIDSCENE_FORCE_DEEP_THINK) 全都没下发。
+        # httpx 直发裸 body, 所以把 helper 放进 extra_body 的内容平铺到顶层。
+        try:
+            from ..ai_model.service_caller import (
+                _apply_deep_think_params,
+                _apply_family_specific_params,
+                _resolve_deep_think,
+            )
+            family = config.model_family
+            if family == "qwen2.5-vl":
+                data["vl_high_resolution_images"] = True
+            _apply_family_specific_params(data, family)  # auto-glm top_p 等(顶层)
+            _dt = _resolve_deep_think(None)  # 读 MIDSCENE_FORCE_DEEP_THINK
+            if _dt is not None:
+                _apply_deep_think_params(data, family, _dt)
+            # helper 把参数放进 data["extra_body"](为 OpenAI SDK 设计); httpx
+            # 发裸 body, 这里展平到顶层(等价 SDK 把 extra_body 合进 body)。
+            _extra = data.pop("extra_body", None)
+            if isinstance(_extra, dict):
+                data.update(_extra)
+        except Exception as exc:  # pragma: no cover - 不让参数整形阻断调用
+            logger.debug(f"family/deep_think param shaping skipped: {exc}")
+
         # 发送请求(带重试机制,处理中转服务临时不可用)
         # 可重试:429/5xx + 传输层 ConnectError/ReadTimeout/ReadError(M7)
         retryable_status_codes = {429, 500, 502, 503, 504}
@@ -715,8 +740,15 @@ class Agent:
 
         result = response.json()
 
-        # 提取响应内容（OpenAI 格式）
-        content = result["choices"][0]["message"]["content"]
+        # 提取响应内容（OpenAI 格式）。部分 OpenAI 兼容端点在过滤/工具调用
+        # 场景会返回 content==null —— 规整为 ""(与 Gemini/Anthropic 原生路径
+        # 一致, 且避免 None 流到 safe_parse_json 抛 TypeError)。
+        try:
+            content = result["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            content = None
+        if content is None:
+            content = ""
 
         # 提取 usage 信息
         usage = None
@@ -1478,7 +1510,9 @@ class Agent:
         json_text = extract_json_from_code_block(raw_content)
         response_data = safe_parse_json(json_text)
 
-        if not response_data:
+        # 必须是 dict —— 模型可能返回数组/标量(extract_json 现在能提取顶层
+        # 数组), 直接 .get 会 AttributeError. 非 dict 一律按解析失败处理。
+        if not isinstance(response_data, dict):
             error = ValueError("Failed to parse assertion response")
             if self.recorder:
                 self.recorder.finish_task(status="failed", error=error)
@@ -2290,6 +2324,11 @@ class Agent:
         """
         try:
             action_upper = action_type.strip()
+            # 模型可能发 "param": null —— `.get("param", {})` 对 null 返回 None,
+            # 后续 param.get(...) 会 AttributeError 被 catch-all 吞成失败。
+            # 统一规整为 dict, 让各分支走干净的"缺参数"逻辑。
+            if not isinstance(param, dict):
+                param = {}
 
             # 有些规划器(UI-TARS)已经把坐标算好放在 locate.center 里;
             # 这种情况下跳过再次 ai_locate 调用,直接用模型给的坐标点击。

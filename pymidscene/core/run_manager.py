@@ -313,7 +313,12 @@ def get_default_run_manager(base_dir: Optional[str] = None) -> MidsceneRunManage
     """
     global _default_manager
 
-    if _default_manager is None or (base_dir and str(_default_manager.base_dir) != base_dir):
+    # 用规范化后的 Path 比较, 而不是 str(base_dir) —— 后者把存储的
+    # Path(已 OS 规范化, 去尾斜杠) 与原始字符串比, 在 Windows / 带尾斜杠的
+    # 输入上永远不等, 反复重建单例。
+    if _default_manager is None or (
+        base_dir and _default_manager.base_dir != Path(base_dir)
+    ):
         _default_manager = MidsceneRunManager(base_dir)
 
     return _default_manager
