@@ -169,21 +169,11 @@ class MidsceneFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        # 生成 ISO 格式的时间戳（带时区）
-        timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.") + \
-                   f"{datetime.now().microsecond // 1000:03d}" + \
-                   datetime.now().strftime("%z") or "+00:00"
-
-        # 如果没有时区信息，添加本地时区
-        if not timestamp.endswith("+") and "+" not in timestamp[-6:] and "-" not in timestamp[-6:]:
-            import time
-            offset = time.timezone if time.daylight == 0 else time.altzone
-            hours, remainder = divmod(abs(offset), 3600)
-            minutes = remainder // 60
-            sign = "-" if offset > 0 else "+"
-            timestamp = timestamp[:-3] + f"{sign}{hours:02d}:{minutes:02d}"
-
-        return f"[{timestamp}] {record.getMessage()}"
+        # 生成 ISO 格式的带时区时间戳, 从单个 aware 时刻派生(对齐 JS, 避免
+        # 此前 datetime.now() 取样三次 + 死代码 `or "+00:00"`)。
+        # 形如: 2025-12-11T16:58:34.413+08:00
+        now = datetime.now().astimezone()
+        return f"[{now.isoformat(timespec='milliseconds')}] {record.getMessage()}"
 
 
 # 全局日志管理器实例

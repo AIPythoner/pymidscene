@@ -56,20 +56,26 @@ def extract_json_from_code_block(text: str) -> str:
     对应 JS 版本: extractJSONFromCodeBlock (service-caller/index.ts:500-524)
     """
     try:
-        # 首先尝试直接匹配 JSON 对象
-        json_match = re.match(r'^\s*(\{[\s\S]*\})\s*$', text)
+        # 首先尝试直接匹配 JSON 对象或顶层数组(数组分支修复
+        # `[{...},{...}]` 多元素被贪婪 `\{...\}` 截成第一个对象的问题)
+        json_match = re.match(r'^\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*$', text)
         if json_match:
             return json_match.group(1)
 
-        # 尝试从代码块中提取
-        code_block_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
+        # 尝试从代码块中提取(对象或数组)
+        code_block_match = re.search(
+            r'```(?:json)?\s*(\{[\s\S]*?\}|\[[\s\S]*?\])\s*```', text
+        )
         if code_block_match:
             return code_block_match.group(1)
 
-        # 尝试找到类似 JSON 的结构
-        json_like_match = re.search(r'\{[\s\S]*\}', text)
-        if json_like_match:
-            return json_like_match.group(0)
+        # 尝试找到类似 JSON 的结构 —— 数组优先(若文本里数组出现得更早)
+        array_like = re.search(r'\[[\s\S]*\]', text)
+        object_like = re.search(r'\{[\s\S]*\}', text)
+        if array_like and (not object_like or array_like.start() < object_like.start()):
+            return array_like.group(0)
+        if object_like:
+            return object_like.group(0)
     except Exception:
         pass
 

@@ -193,7 +193,14 @@ class Agent:
                     f"{css_width}x{css_height} (dpr={dpr})"
                 )
             except Exception as exc:
-                logger.warning(f"Screenshot CSS normalization failed: {exc}")
+                # 归一化是 dpr!=1 时的硬性前提: 不归一化, 模型坐标(物理像素)
+                # 与点击/标注(CSS 像素)会系统性错位 dpr 倍。静默降级会导致
+                # 每次点击都偏 + 报告标注画错位置, 所以这里直接报错(快速失败)。
+                raise RuntimeError(
+                    f"Screenshot CSS normalization failed on a HiDPI capture "
+                    f"(dpr={dpr}); coordinates would be off by {dpr}x. "
+                    f"Original error: {exc}"
+                ) from exc
 
         return screenshot_b64, size
 
@@ -303,6 +310,34 @@ class Agent:
             self._call_ai_with_config, messages, intent
         )
 
+    def _native_retry(
+        self,
+        config: ModelConfig,
+        do_call: "Any",
+    ) -> dict[str, Any]:
+        """
+        Run a native-SDK (Gemini/Anthropic) call with JS-style retry.
+
+        对齐 JS service-caller 的非流式重试: 最多 retry_count+1 次, 每次间隔
+        retry_interval 毫秒, 任意异常都重试(含 do_call 抛的 'empty content').
+        此前两条原生路径完全无重试, config.retry_count/interval 被忽略.
+        """
+        import time as _t
+        attempts = (config.retry_count or 0) + 1
+        last_exc: Optional[Exception] = None
+        for i in range(1, attempts + 1):
+            try:
+                return do_call()
+            except Exception as e:
+                last_exc = e
+                logger.error(
+                    f"Native AI call attempt {i}/{attempts} failed: {e}"
+                )
+                if i < attempts:
+                    _t.sleep((config.retry_interval or 0) / 1000)
+        assert last_exc is not None
+        raise last_exc
+
     def _call_with_anthropic_sdk(
         self,
         config: ModelConfig,
@@ -345,38 +380,44 @@ class Agent:
         # Anthropic 的 max_tokens 是必填参数, 不能省略. 用配置值, 未配置时
         # 用一个较大的默认(8192)而非 4096, 避免截断大响应.
         _anthropic_max_tokens = get_configured_max_tokens() or 8192
-        response = client.messages.create(
-            model=config.model_name,
-            max_tokens=_anthropic_max_tokens,
-            system=system_text if system_text else anthropic.NOT_GIVEN,
-            messages=anthropic_messages,
-        )
+        # 对齐 JS: 所有 provider 都发 temperature(默认 0), 这是让 VLM 坐标/
+        # JSON 输出确定可复现的关键. Anthropic 接受 0-1.
+        _temperature = config.temperature if config.temperature is not None else 0
 
-        # 拼接所有 text block 为 content
-        content_parts: List[str] = []
-        for block in getattr(response, "content", []) or []:
-            text = getattr(block, "text", None)
-            if text:
-                content_parts.append(text)
-        content = "".join(content_parts)
+        def _do_call() -> dict[str, Any]:
+            response = client.messages.create(
+                model=config.model_name,
+                max_tokens=_anthropic_max_tokens,
+                temperature=_temperature,
+                system=system_text if system_text else anthropic.NOT_GIVEN,
+                messages=anthropic_messages,
+            )
 
-        usage_obj = getattr(response, "usage", None)
-        usage: Optional[Dict[str, Any]] = None
-        if usage_obj is not None:
-            prompt_tokens = getattr(usage_obj, "input_tokens", None)
-            completion_tokens = getattr(usage_obj, "output_tokens", None)
-            total = (prompt_tokens or 0) + (completion_tokens or 0)
-            usage = {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": total or None,
-            }
+            content_parts: list[str] = []
+            for block in getattr(response, "content", []) or []:
+                text = getattr(block, "text", None)
+                if text:
+                    content_parts.append(text)
+            content = "".join(content_parts)
+            if not content:
+                # 对齐 JS: 空响应是硬错误(并被重试), 而不是悄悄返回 ""
+                raise RuntimeError("empty content from AI model")
 
-        return {
-            "content": content,
-            "usage": usage,
-            "raw_response": response,
-        }
+            usage_obj = getattr(response, "usage", None)
+            usage: dict[str, Any] | None = None
+            if usage_obj is not None:
+                prompt_tokens = getattr(usage_obj, "input_tokens", None)
+                completion_tokens = getattr(usage_obj, "output_tokens", None)
+                total = (prompt_tokens or 0) + (completion_tokens or 0)
+                usage = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total or None,
+                }
+
+            return {"content": content, "usage": usage, "raw_response": response}
+
+        return self._native_retry(config, _do_call)
 
     def _convert_messages_to_anthropic(
         self,
@@ -460,7 +501,7 @@ class Agent:
         支持：官方 API、中转站、反代 —— 只需配置 base_url
         """
         from google import genai
-        from google.genai.types import HttpOptions
+        from google.genai.types import GenerateContentConfig, HttpOptions
 
         base_url = (config.openai_base_url or "").rstrip("/")
         if not base_url:
@@ -471,49 +512,73 @@ class Agent:
             http_options=HttpOptions(base_url=base_url),
         )
 
-        # 将 OpenAI 格式的 messages 转换为 Gemini contents 格式
-        contents = self._convert_messages_to_gemini_contents(messages)
+        # 将 OpenAI 格式的 messages 转换为 Gemini (system_instruction, contents)
+        system_text, contents = self._convert_messages_to_gemini_contents(messages)
 
         logger.info(f"Calling Gemini API via google-genai SDK: model={config.model_name}, base_url={base_url}")
 
-        response = client.models.generate_content(
-            model=config.model_name,
-            contents=contents,
-        )
-
-        content = response.text or ""
-        usage = None
-        if response.usage_metadata:
-            usage = {
-                "prompt_tokens": response.usage_metadata.prompt_token_count,
-                "completion_tokens": response.usage_metadata.candidates_token_count,
-                "total_tokens": response.usage_metadata.total_token_count,
-            }
-
-        return {
-            "content": content,
-            "usage": usage,
-            "raw_response": None,
+        # 对齐 JS: 发 temperature(默认 0)以让 VLM 输出确定可复现; 系统提示走
+        # system_instruction(而非折叠进 user turn); max_output_tokens 仅在配置时设.
+        gen_kwargs: dict[str, Any] = {
+            "temperature": config.temperature if config.temperature is not None else 0,
         }
+        if system_text:
+            gen_kwargs["system_instruction"] = system_text
+        _max_out = get_configured_max_tokens()
+        if _max_out:
+            gen_kwargs["max_output_tokens"] = _max_out
+        gen_config = GenerateContentConfig(**gen_kwargs)
+
+        def _do_call() -> dict[str, Any]:
+            response = client.models.generate_content(
+                model=config.model_name,
+                contents=contents,
+                config=gen_config,
+            )
+
+            content = response.text or ""
+            if not content:
+                raise RuntimeError("empty content from AI model")
+
+            usage = None
+            if response.usage_metadata:
+                usage = {
+                    "prompt_tokens": response.usage_metadata.prompt_token_count,
+                    "completion_tokens": response.usage_metadata.candidates_token_count,
+                    "total_tokens": response.usage_metadata.total_token_count,
+                }
+
+            return {"content": content, "usage": usage, "raw_response": None}
+
+        return self._native_retry(config, _do_call)
+
     def _convert_messages_to_gemini_contents(
         self,
         messages: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple[str, list[dict[str, Any]]]:
         """
-        将 OpenAI 格式的 messages 转换为 Gemini contents 格式
-        
+        将 OpenAI 格式的 messages 转换为 Gemini (system_instruction, contents).
+
         OpenAI: [{role, content: str | [{type: text/image_url, ...}]}]
-        Gemini: [{role, parts: [{text} | {inline_data: {mime_type, data}}]}]
+        Gemini: system 文本单独走 system_instruction; 其余转 contents
+                [{role, parts: [{text} | {inline_data: {mime_type, data}}]}]
         """
-        contents = []
+        system_parts: list[str] = []
+        contents: list[dict[str, Any]] = []
         for msg in messages:
             role = msg.get('role', 'user')
-            if role == 'system':
-                # Gemini 没有 system role，合并到 user
-                role = 'user'
-            elif role == 'assistant':
-                role = 'model'
             raw_content = msg.get('content', '')
+            if role == 'system':
+                # system 文本不折叠进 user turn, 而是收集后走 system_instruction
+                if isinstance(raw_content, str):
+                    system_parts.append(raw_content)
+                elif isinstance(raw_content, list):
+                    for item in raw_content:
+                        if item.get('type') == 'text':
+                            system_parts.append(item.get('text', ''))
+                continue
+            if role == 'assistant':
+                role = 'model'
             parts = []
             if isinstance(raw_content, str):
                 parts.append({'text': raw_content})
@@ -537,7 +602,8 @@ class Agent:
                             parts.append({'text': f'[image: {image_url}]'})
             if parts:
                 contents.append({'role': role, 'parts': parts})
-        return contents
+        system_text = "\n\n".join(p for p in system_parts if p)
+        return system_text, contents
 
     def _call_with_httpx(
         self,

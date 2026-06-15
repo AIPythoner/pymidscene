@@ -41,28 +41,51 @@ class MidsceneRunManager:
         初始化目录管理器
 
         Args:
-            base_dir: 基础目录路径，默认为当前工作目录
+            base_dir: 基础目录路径; 显式给出时 run 目录 = base_dir/midscene_run。
+                未给出时对齐 JS `getMidsceneRunDir`: 读 MIDSCENE_RUN_DIR(相对则
+                相对 cwd 解析), 未设时用 cwd/midscene_run —— 这样 report/dump
+                与 cache(task_cache 也读 MIDSCENE_RUN_DIR)落在同一根目录下。
         """
-        self.base_dir = Path(base_dir) if base_dir else Path.cwd()
-        self.run_dir = self.base_dir / self.RUN_DIR_NAME
+        if base_dir:
+            self.base_dir = Path(base_dir)
+            self.run_dir = self.base_dir / self.RUN_DIR_NAME
+        else:
+            run_dir_env = os.environ.get("MIDSCENE_RUN_DIR") or self.RUN_DIR_NAME
+            self.run_dir = Path(os.path.abspath(run_dir_env))
+            self.base_dir = self.run_dir.parent
         self._ensure_directories()
 
         logger.debug(f"MidsceneRunManager initialized: {self.run_dir}")
 
     def _ensure_directories(self) -> None:
-        """确保所有子目录存在"""
-        directories = [
-            self.cache_dir,
-            self.dump_dir,
-            self.log_dir,
-            self.output_dir,
-            self.report_dir,
-        ]
-
-        for dir_path in directories:
-            dir_path.mkdir(parents=True, exist_ok=True)
+        """确保所有子目录存在; 创建失败(如 cwd 只读)时回落到临时目录(对齐 JS)。"""
+        try:
+            self._mkdirs_under(self.run_dir)
+        except OSError as exc:
+            import tempfile
+            fallback = Path(tempfile.gettempdir()) / self.RUN_DIR_NAME
+            logger.warning(
+                f"Cannot create run dir {self.run_dir} ({exc}); "
+                f"falling back to {fallback}"
+            )
+            self.run_dir = fallback
+            self.base_dir = fallback.parent
+            self._mkdirs_under(self.run_dir)
 
         logger.debug(f"Ensured directories exist in: {self.run_dir}")
+
+    def _mkdirs_under(self, run_dir: Path) -> None:
+        for sub in (self.CACHE_DIR, self.DUMP_DIR, self.LOG_DIR,
+                    self.OUTPUT_DIR, self.REPORT_DIR):
+            (run_dir / sub).mkdir(parents=True, exist_ok=True)
+        # 自包含 .gitignore: 让 git 忽略整个 run 目录的产物, 避免被提交。
+        # (JS 追加到项目 .gitignore; 这里用自包含方式, 不改用户的项目文件。)
+        gitignore = run_dir / ".gitignore"
+        if not gitignore.exists():
+            try:
+                gitignore.write_text("# Midscene 运行产物\n*\n", encoding="utf-8")
+            except OSError:
+                pass
 
     @property
     def cache_dir(self) -> Path:

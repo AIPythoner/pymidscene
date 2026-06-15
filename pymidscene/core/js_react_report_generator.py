@@ -740,11 +740,14 @@ class JSReactReportGenerator:
         Returns:
             保存的文件路径
         """
-        # 生成文件名
+        # 生成文件名 —— 对齐 JS getReportFileName: 前缀用 MIDSCENE_REPORT_TAG_NAME
+        # (若设置), 否则用 driver_type, 方便 CI 等场景给报告分组/标识。
         if filename is None:
+            import os
             timestamp = datetime.now()
             session_id = uuid.uuid4().hex[:8]
-            filename = f"{driver_type}-{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}-{session_id}.html"
+            tag = os.environ.get("MIDSCENE_REPORT_TAG_NAME") or driver_type
+            filename = f"{tag}-{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}-{session_id}.html"
         
         # 确保目录存在
         report_path = Path(report_dir)

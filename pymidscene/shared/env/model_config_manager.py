@@ -27,6 +27,9 @@ from .constants import (
     MIDSCENE_USE_GEMINI,
     MIDSCENE_MODEL_MAX_TOKENS,
     OPENAI_MAX_TOKENS,
+    MIDSCENE_OPENAI_SOCKS_PROXY,
+    MIDSCENE_OPENAI_HTTP_PROXY,
+    MIDSCENE_OPENAI_INIT_CONFIG_JSON,
     ModelConfigKeys,
 )
 from ..logger import logger
@@ -138,10 +141,15 @@ def parse_openai_sdk_config(
 
     对应 JS 版本的 parseOpenaiSdkConfig
     """
-    # 旧版兼容
+    # 旧版兼容 —— 对齐 JS parseOpenaiSdkConfig: default intent 下读取五个 legacy 值
     legacy_api_key = provider.get(OPENAI_API_KEY) if use_legacy_logic else None
     legacy_base_url = provider.get(OPENAI_BASE_URL) if use_legacy_logic else None
     legacy_model_family = legacy_config_to_model_family(provider) if use_legacy_logic else None
+    legacy_socks_proxy = provider.get(MIDSCENE_OPENAI_SOCKS_PROXY) if use_legacy_logic else None
+    legacy_http_proxy = provider.get(MIDSCENE_OPENAI_HTTP_PROXY) if use_legacy_logic else None
+    legacy_extra_config_str = (
+        provider.get(MIDSCENE_OPENAI_INIT_CONFIG_JSON) if use_legacy_logic else None
+    )
 
     # 获取配置值
     model_family = provider.get(keys.model_family) or legacy_model_family
@@ -152,11 +160,11 @@ def parse_openai_sdk_config(
     # 验证模型家族
     validate_model_family(model_family)
 
-    # 解析数值配置
+    # 解析数值配置 —— timeout 用 int(float()) 接受小数字符串(对齐 JS Number())
     timeout = None
     if provider.get(keys.timeout):
         try:
-            timeout = int(provider[keys.timeout])
+            timeout = int(float(provider[keys.timeout]))
         except (ValueError, TypeError):
             pass
 
@@ -167,34 +175,39 @@ def parse_openai_sdk_config(
         except (ValueError, TypeError):
             pass
 
+    # retry —— 对齐 JS: 解析失败用默认值, 但负数必须抛错(不能被 except 吞掉)
     retry_count = 1
     if provider.get(keys.retry_count):
         try:
             val = int(provider[keys.retry_count])
+        except (ValueError, TypeError):
+            val = None
+        if val is not None:
             if val < 0:
                 raise ValueError(f"{keys.retry_count} must be non-negative, got {val}")
             retry_count = val
-        except (ValueError, TypeError):
-            pass
 
     retry_interval = 2000
     if provider.get(keys.retry_interval):
         try:
             val = int(provider[keys.retry_interval])
+        except (ValueError, TypeError):
+            val = None
+        if val is not None:
             if val < 0:
                 raise ValueError(f"{keys.retry_interval} must be non-negative, got {val}")
             retry_interval = val
-        except (ValueError, TypeError):
-            pass
 
-    # 解析额外配置
+    # 解析额外配置 —— 对齐 JS parseJson: 非法 JSON 抛错(快速失败), 而不是静默忽略
     openai_extra_config = None
-    extra_config_str = provider.get(keys.openai_extra_config)
+    extra_config_str = provider.get(keys.openai_extra_config) or legacy_extra_config_str
     if extra_config_str:
         try:
             openai_extra_config = json.loads(extra_config_str)
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse {keys.openai_extra_config} as JSON")
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Failed to parse {keys.openai_extra_config} as a JSON. {exc}"
+            ) from exc
 
     # 生成模型描述
     model_description = f"{model_family} mode" if model_family else ""
@@ -208,8 +221,8 @@ def parse_openai_sdk_config(
         temperature=temperature,
         retry_count=retry_count,
         retry_interval=retry_interval,
-        socks_proxy=provider.get(keys.socks_proxy),
-        http_proxy=provider.get(keys.http_proxy),
+        socks_proxy=provider.get(keys.socks_proxy) or legacy_socks_proxy,
+        http_proxy=provider.get(keys.http_proxy) or legacy_http_proxy,
         openai_extra_config=openai_extra_config,
         model_description=model_description,
     )

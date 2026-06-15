@@ -2,7 +2,53 @@
 
 ## [Unreleased]
 
-## [0.3.5] - 2026-06-16
+## [0.3.6] - 2026-06-16
+
+第六轮审查:首次系统审查 config / 非 OpenAI 调用路径 / 支撑层(env 配置解析、
+Gemini/Anthropic 原生调用、deep_think 与家族专用参数、element_marker、
+run/log、JSON 修复)。25 条经对抗验证确认的发现, 修复如下。
+
+### Fixed
+
+**调用路径(确定性 / 硬失败):**
+
+- **Gemini/Anthropic 原生路径此前不发 temperature** → 用各 provider 的服务端默认(约 1.0)采样, VLM 坐标/JSON 输出不确定、不可复现。现都发 `temperature`(默认 0, 对齐 JS 给所有 provider 发 temperature=0)
+- **gpt-5 deepThink 此前把 `reasoning` 当顶层 kwarg 传给 OpenAI SDK** → 该 SDK 无此参数, 每次 gpt-5 deep_think 调用都 `TypeError` 硬失败。现经 `extra_body` 传入(落到 JSON body 顶层, 与 JS 一致)
+- Gemini/Anthropic 原生路径补上重试(对齐 JS: retry_count+1 次, 间隔 retry_interval)与空响应报错(`empty content from AI model`); 此前两条路径完全无重试、空响应静默返回 ""
+- Gemini 系统提示改走 `system_instruction`(而非折叠进 user turn 产生两个连续 user 轮次)
+
+**deep_think / 家族参数:**
+
+- qwen3-vl `enable_thinking` 此前嵌在多余的 `config` 包装里; 现直接放 `extra_body` 顶层(对齐 JS 展开后的 wire 格式)
+- `vl_high_resolution_images` 此前因模型名兜底会误加到 qwen3-vl / qwen-vl-max 上; 现严格按 `family == 'qwen2.5-vl'` 触发(对齐 JS)
+- 显式设了 deepThink 但 family 不支持时给出可见 warning(对齐 JS), 不再静默
+
+**env / 配置解析:**
+
+- default intent 下补回三个 legacy 兜底: `MIDSCENE_OPENAI_SOCKS_PROXY` / `MIDSCENE_OPENAI_HTTP_PROXY` / `MIDSCENE_OPENAI_INIT_CONFIG_JSON`(对齐 JS)
+- 非法 `MIDSCENE_MODEL_INIT_CONFIG_JSON` 改为抛错(快速失败, 对齐 JS), 不再静默忽略
+- 负数 retry_count/interval 改为抛错(此前被同一 try/except 吞掉); timeout 用 `int(float())` 接受小数字符串(对齐 JS `Number()`)
+
+**run / log:**
+
+- `MidsceneRunManager` 此前忽略 `MIDSCENE_RUN_DIR`, 导致 report/dump 与 cache 落在不同根目录; 现读取该变量(对齐 JS), 并在 run 目录写自包含 `.gitignore`, run 目录创建失败时回落临时目录
+- 报告文件名前缀支持 `MIDSCENE_REPORT_TAG_NAME`(对齐 JS getReportFileName)
+- 日志时间戳从单个 aware 时刻派生(此前 `datetime.now()` 取样三次 + 死代码 `or "+00:00"`)
+
+**JSON 修复:**
+
+- 顶层数组(`[{...},{...}]`)此前被贪婪对象匹配截成第一个对象 → 现数组感知提取, 多元素完整解析
+- 空/纯空白内容改为报解析失败(此前 json_repair 返回空串让调用方拿到 "")
+- 修复结果只接受 dict/list 形态; 非 JSON 散文经 json_repair 还原成裸标量时视为失败兜底, 不再返回标量
+
+**报告:**
+
+- HiDPI 截图 CSS 归一化失败时改为报错(此前静默降级 → 模型坐标与点击/标注错位 dpr 倍, 每次点击都偏)
+
+### Notes（确认存在但有意不改）
+
+- httpx(OpenAI 兼容)路径仍仅在 temperature>0 时发送: 这是为兼容拒绝 temperature 的推理模型的有意取舍(原生路径已补 temperature=0)
+- UI-TARS model_description 字符串与 JS 不同(报告显示用, Python 从 family 派生); MIDSCENE_FORCE_DEEP_THINK 的作用域、MidsceneLogManager(基本未用)未改
 
 第五轮审查:首次系统性对照 JS 审查此前未覆盖的 model / coordinate / prompt /
 parser 层（坐标适配、AI service caller、UI-TARS 与 auto-GLM 解析器、prompts、

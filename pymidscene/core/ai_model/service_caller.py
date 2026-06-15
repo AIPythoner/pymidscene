@@ -65,19 +65,33 @@ def _apply_deep_think_params(
         return
 
     family = model_family.strip().lower()
-    extra_body = cast(dict[str, Any], request_params.setdefault("extra_body", {}))
+
+    def _extra_body() -> dict[str, Any]:
+        return cast(dict[str, Any], request_params.setdefault("extra_body", {}))
 
     if family == "qwen3-vl":
-        config_block = cast(dict[str, Any], extra_body.setdefault("config", {}))
-        config_block["enable_thinking"] = bool(deep_think)
+        # JS resolveDeepThinkConfig returns {config:{enable_thinking}} and
+        # SPREADS the inner config, so the wire body gets `enable_thinking` at
+        # the TOP level — not nested under a `config` key.
+        _extra_body()["enable_thinking"] = bool(deep_think)
     elif family in ("doubao-vision", "glm-v"):
-        thinking_block = cast(dict[str, Any], extra_body.setdefault("thinking", {}))
+        thinking_block = cast(dict[str, Any], _extra_body().setdefault("thinking", {}))
         thinking_block["type"] = "enabled" if deep_think else "disabled"
     elif family == "gpt-5":
+        # JS spreads `reasoning:{effort}` into the body top-level. The stock
+        # OpenAI Python SDK has no top-level `reasoning` kwarg (passing it
+        # raises TypeError), so route it through extra_body which merges into
+        # the JSON body at the top level.
         reasoning_block = cast(
-            dict[str, Any], request_params.setdefault("reasoning", {})
+            dict[str, Any], _extra_body().setdefault("reasoning", {})
         )
         reasoning_block["effort"] = "high" if deep_think else "low"
+    else:
+        # 对齐 JS: 显式设了 deepThink 但 family 不支持时给出可见警告
+        logger.warning(
+            f'The "deepThink" option is not supported for model_family '
+            f'"{model_family}"; it will be ignored.'
+        )
 
 
 def _apply_family_specific_params(
@@ -143,35 +157,50 @@ def safe_parse_json_with_repair(
     clean_json_string = extract_json_from_code_block(text)
     last_error: Exception | None = None
 
-    # 匹配点坐标格式 (x,y)
-    point_match = re.search(r'\((\d+),(\d+)\)', clean_json_string)
-    if point_match:
-        return [int(point_match.group(1)), int(point_match.group(2))]
+    # 空/纯空白内容直接判为解析失败(对齐 JS: jsonrepair('') 抛错), 否则
+    # json_repair('') 会返回 '' 让调用方拿到一个空字符串而非明确错误。
+    if not clean_json_string.strip():
+        last_error = ValueError("empty content")
+    else:
+        # 匹配点坐标格式 (x,y)
+        point_match = re.search(r'\((\d+),(\d+)\)', clean_json_string)
+        if point_match:
+            return [int(point_match.group(1)), int(point_match.group(2))]
 
-    # 首先尝试直接解析
-    try:
-        parsed = json.loads(clean_json_string)
-        return normalize_json_object(parsed)
-    except (json.JSONDecodeError, ValueError) as exc:
-        last_error = exc
-
-    # 尝试修复后解析
-    try:
-        repaired = repair_json(clean_json_string)
-        parsed = json.loads(repaired)
-        return normalize_json_object(parsed)
-    except Exception as exc:
-        last_error = exc
-
-    # 豆包/UI-TARS 特殊处理
-    if model_family == 'doubao-vision' or is_ui_tars(model_family):
-        json_string = preprocess_doubao_bbox_json(clean_json_string)
+        # 首先尝试直接解析(任意合法 JSON 都接受)
         try:
-            repaired = repair_json(json_string)
-            parsed = json.loads(repaired)
+            parsed = json.loads(clean_json_string)
             return normalize_json_object(parsed)
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+
+        # 尝试修复后解析 —— 只接受 dict/list 形态; 非 JSON 散文经 json_repair
+        # 会被还原成裸字符串/标量(与 JS jsonrepair 产出不同且非调用方期望),
+        # 这种情况视为失败继续兜底而不是返回标量。
+        try:
+            repaired = repair_json(clean_json_string)
+            parsed = json.loads(repaired)
+            if isinstance(parsed, dict | list):
+                return normalize_json_object(parsed)
+            last_error = ValueError(
+                f"repair yielded non-object/array: {type(parsed).__name__}"
+            )
         except Exception as exc:
             last_error = exc
+
+        # 豆包/UI-TARS 特殊处理
+        if model_family == 'doubao-vision' or is_ui_tars(model_family):
+            json_string = preprocess_doubao_bbox_json(clean_json_string)
+            try:
+                repaired = repair_json(json_string)
+                parsed = json.loads(repaired)
+                if isinstance(parsed, dict | list):
+                    return normalize_json_object(parsed)
+                last_error = ValueError(
+                    f"repair yielded non-object/array: {type(parsed).__name__}"
+                )
+            except Exception as exc:
+                last_error = exc
 
     error_message = (
         "failed to parse LLM response into JSON. "
@@ -356,11 +385,10 @@ def call_ai(
     if _max_tokens is not None and _max_tokens > 0:
         request_params["max_tokens"] = _max_tokens
 
-    # 千问 VL 特定配置
+    # 千问 VL 特定配置 —— 对齐 JS: 严格按 family == 'qwen2.5-vl' 触发,
+    # 不做模型名兜底(否则 qwen3-vl / qwen-vl-max 会被错误地塞进 JS 不发的
+    # vl_high_resolution_images 参数).
     is_qwen_vl_model = model_config.model_family == "qwen2.5-vl"
-    if not is_qwen_vl_model:
-        model_name_lower = model_config.model_name.lower()
-        is_qwen_vl_model = "qwen" in model_name_lower and "vl" in model_name_lower
 
     if is_qwen_vl_model:
         extra_body = cast(
