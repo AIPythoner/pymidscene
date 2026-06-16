@@ -120,8 +120,9 @@ def main() -> None:
         len(matches) == 1
     ), "Generated report HTML should embed exactly one Midscene dump payload block."
     assert (
-        matches[0].group(1) == '<script type="midscene_web_dump">'
-    ), "Generated report HTML should use the corrected Midscene dump tag shape."
+        matches[0].group(1)
+        == '<script type="midscene_web_dump" type="application/json">'
+    ), "Generated report HTML should use the JS dump tag shape (two type attrs)."
     assert "无法加载 JS 版本的 React 可视化模板" not in html, (
         "Generated report HTML should be rendered from packaged report_template resources, "
         "not the template-unavailable fallback page."

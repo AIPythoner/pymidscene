@@ -440,7 +440,8 @@ class IOSDevice(AbstractInterface):
         ]
         ok = await self.wda.dismiss_keyboard(keys)
         if ok:
-            await asyncio.sleep(0.3)
+            # 等键盘消失动画稳定(对齐 JS hideKeyboard 的 sleep(500))
+            await asyncio.sleep(0.5)
             return True
 
         # fallback: 上滑手势
@@ -450,7 +451,7 @@ class IOSDevice(AbstractInterface):
             sy = int(size["height"] * 0.9)
             ey = int(size["height"] * 0.5)
             await self.wda.swipe(cx, sy, cx, ey, duration_ms=300)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
             return True
         except Exception as exc:
             logger.debug(f"hide_keyboard fallback failed: {exc}")

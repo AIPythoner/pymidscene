@@ -235,6 +235,10 @@ class IOSWebDriverClient(WebDriverClient):
         self.ensure_session()
         normalized = (key or "").strip()
         if not normalized:
+            # 原始 key 是单个字符(含空格)时,对齐 JS pressKey 的 key.length===1
+            # 兜底直接发送;只有真正的空串才不发。
+            if isinstance(key, str) and len(key) == 1:
+                await self._send_keys([key])
             return
 
         if normalized in ("Enter", "Return", "return"):
@@ -385,7 +389,8 @@ class IOSWebDriverClient(WebDriverClient):
             window_max = max(size["width"], size["height"])
             if window_max <= 0:
                 return None
-            return round(screenshot_max / window_max)
+            from ..shared.utils import js_round  # 半数向上,对齐 JS Math.round
+            return js_round(screenshot_max / window_max)
         except Exception as exc:
             logger.debug(f"fallback screen scale calc failed: {exc}")
         return None

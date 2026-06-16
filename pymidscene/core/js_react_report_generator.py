@@ -492,16 +492,26 @@ class JSReactReportGenerator:
             cost=duration_ms,
         )
         
-        # 构建参数 —— 字段名对齐 JS ui-utils.ts `extractInsightParam`:
-        # Assert 读 param.assertion、Query 读 param.dataDemand,
-        # 其余(Locate/Planning/Action)读 param.prompt
+        # 构建参数 —— 字段名对齐 JS ui-utils.ts `paramStr`/`extractInsightParam`:
+        # - Insight/Assert 读 param.assertion、Insight/Query 读 param.dataDemand
+        # - Planning/Plan 读 output.log || param.userInstruction(不是 prompt)
+        # - Action Space 读结构化键(locate/value/...);这里没有结构化数据,就
+        #   不塞 phantom 的 param.prompt(JS 真实报告里没有这个键,detail 面板会
+        #   把它当多余一行显示)——留空让 paramStr 回退到 thought;元素描述本身
+        #   由前面的 Locate 步骤承载。
+        # - 其余(Insight/Locate)沿用 param.prompt(Locate 另附 bbox/output.element)
         param = {}
         if prompt:
             if sub_type == "Assert":
                 param["assertion"] = prompt
             elif sub_type == "Query":
                 param["dataDemand"] = prompt
+            elif task_type == "Planning" and sub_type == "Plan":
+                param["userInstruction"] = prompt
+            elif task_type == "Action Space":
+                pass  # 不塞 prompt:见上
             else:
+                # Insight/Locate、Planning/Locate 等沿用 param.prompt
                 param["prompt"] = prompt
         # 如果是 Locate 任务且有元素信息，添加 bbox 到 param
         if sub_type == "Locate" and element_rect:
@@ -674,11 +684,14 @@ class JSReactReportGenerator:
     def generate_data_script(self) -> str:
         """
         生成数据注入的 script 标签
-        
-        格式与 JS 版本完全一致:
-        <script type="midscene_web_dump">
+
+        格式与 JS 版本完全一致(两个 type 属性):
+        <script type="midscene_web_dump" type="application/json">
         {JSON数据}
         </script>
+        第二个 ``type="application/json"`` 是 JS ReportMergingTool 提取脚本块的
+        正则硬要求(report.ts);缺它则 Python 报告无法被官方工具合并。浏览器对
+        重复属性取第一个,所以单独查看显示不受影响。
         """
         if not self._current_dump:
             self.start_session()
@@ -692,7 +705,10 @@ class JSReactReportGenerator:
         
         escaped_json = _escape_script_tag(data_json)
         
-        return f'<script type="midscene_web_dump">\n{escaped_json}\n</script>'
+        return (
+            f'<script type="midscene_web_dump" type="application/json">\n'
+            f'{escaped_json}\n</script>'
+        )
     
     def generate_html(self) -> str:
         """

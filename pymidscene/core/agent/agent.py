@@ -25,9 +25,6 @@ from ...web_integration.base import AbstractInterface
 from ...shared.types import Size, Rect, LocateResultElement
 from ...shared.logger import logger
 from ...shared.utils import (
-    calculate_center,
-    format_bbox,
-    adapt_bbox,
     resize_image_base64,
     resize_image_base64_to_size,
 )
@@ -3247,6 +3244,15 @@ class Agent:
         if self.task_cache:
             return self.task_cache.get_stats()
         return None
+
+    def flush_cache(self, clean_unused: bool = False) -> None:
+        """把缓存落盘(对齐 JS ``agent.flushCache({cleanUnused})``)。
+
+        ``clean_unused=True`` 时清掉本次运行从未命中的缓存记录(GC 掉过期 prompt),
+        缓存文件才不会只增不减。
+        """
+        if self.task_cache:
+            self.task_cache._flush_cache_to_file(clean_unused=clean_unused)
 
     def finish(self) -> Optional[str]:
         """

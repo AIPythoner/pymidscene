@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-17
+
+核心功能(web / 移动端 / 缓存 / 日志报告 / 坐标)横扫 JS 保真审查(8 区对抗,
+41 发现 / 19 确认)后的一批修复,外加补齐 `flush_cache`。因改了 web 动作后的等待
+时机与视口尺寸参考系(行为可见),升 minor。其余确认项见末尾 Notes。
+
+### Added
+
+- **`Agent.flush_cache(clean_unused=False)`**(对齐 JS `agent.flushCache`)——
+  `clean_unused=True` 时清掉本次运行从未命中的缓存记录,缓存文件不再只增不减。
+
+### Fixed
+
+**Android:**
+- `get_connected_devices` 此前写的是 adbutils 不消费的 `ADB_PATH` 环境变量 →
+  配了 `MIDSCENE_ADB_PATH` 时设备发现静默退回 PATH 上的 adb;现写 adbutils 实际
+  读取的 `ADBUTILS_ADB_PATH`(与 `device.py` 一致 —— 当初那处修复漏到了这里)
+
+**Web(Playwright):**
+- `right_click` / `input_text` / `long_press` / `hover` / `scroll` 动作后此前不等
+  导航 → 触发跳转/自动提交时与下一步竞态;现都 `wait_for_navigation`(对齐 JS 的
+  集中式 afterInvokeAction)
+- `screenshot()` 截图前先等导航落定,并传 `timeout=10s`(对齐 JS)—— 避免刚跳转
+  就截图拍到旧/空白帧、卡页面继承 30s 默认而阻塞 3 倍
+- `get_size` 改用 `documentElement.clientWidth/clientHeight`(排除滚动条),此前
+  `innerWidth/innerHeight` 把经典滚动条的 15-17px 算进坐标参考系,右/下边缘偏移
+
+**iOS:**
+- `press_key(' ')`(单个空格)此前被 strip 成空串静默丢弃;现对齐 JS 的单字符
+  兜底直接发送
+- `hide_keyboard` 键盘消失动画等待 300→500ms(对齐 JS)
+- 截图缩放回退改用 `js_round`(半数向上)而非 Python 的 banker's round
+
+**日志报告:**
+- 注入数据的 `<script>` 补上第二个 `type="application/json"` 属性 —— JS
+  `ReportMergingTool` 的提取正则硬要求它,缺了 Python 报告无法被官方工具合并
+  (独立查看不受影响)
+- Planning/Plan 节点的 param 改用 `userInstruction`(JS `paramStr` 读它、不读
+  prompt),此前 act/plan 节点副标题为空
+- Action Space 节点不再塞 phantom 的 `param.prompt`(JS 真实报告无此键,detail
+  面板会把它当多余一行渲染;元素描述由前面的 Locate 步骤承载)
+
+### Notes(确认但本轮有意未做)
+
+- qwen2.5-vl **全图**(非 deepThink)定位未做 28 块对齐填充(模型内部会自适配,
+  差异 <1%;动主力定位路径风险高,暂缓)
+- 报告里 aiQuery/aiAssert 的返回值与断言结果未进 output 面板、deepThink section
+  段 token 未单独计入 `searchAreaUsage`(均为报告/计数层 cosmetic,需 recorder 改造)
+- 多 display 完整处理、per-topic 日志文件(JS getDebug → `<topic>.log`)—— 均为
+  已文档化的已知遗留
+
 ## [0.6.0] - 2026-06-17
 
 感知层 JS 对齐第二批:实现 JS 的 **deepThink 两段式 section-zoom 定位** 与

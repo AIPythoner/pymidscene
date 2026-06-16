@@ -64,7 +64,10 @@ def _list_devices_sync() -> list[ConnectedDevice]:
     adb_port = os.environ.get(MIDSCENE_ADB_REMOTE_PORT)
     adb_path = os.environ.get(MIDSCENE_ADB_PATH)
     if adb_path:
-        os.environ.setdefault("ADB_PATH", adb_path)
+        # adbutils 读的是 ADBUTILS_ADB_PATH(见 adbutils._utils.adb_path),不是
+        # ADB_PATH;无条件覆盖,与 device.py 的 connect 路径保持一致 —— 否则
+        # 配了 MIDSCENE_ADB_PATH 的设备发现会静默退回 PATH 上的 adb。
+        os.environ["ADBUTILS_ADB_PATH"] = adb_path
     if adb_host:
         client = adbutils.AdbClient(
             host=adb_host, port=int(adb_port) if adb_port else 5037

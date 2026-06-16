@@ -64,7 +64,10 @@ def _build_contract_report_generator() -> JSReactReportGenerator:
 def _extract_midscene_dump(html: str) -> dict:
     matches = list(
         re.finditer(
-            r'<script[^>]*type="midscene_web_dump"[^>]*>\s*(.*?)\s*</script>',
+            # 锚定行首 \n<script(对齐 JS ReportMergingTool)——模板自身的压缩 JS
+            # 里也含字面量 `<script type="midscene_web_dump" type="application/json"`,
+            # 不加 \n 锚会先匹配到那串 JS 而非真正的数据标签。
+            r'\n<script[^>]*type="midscene_web_dump"[^>]*>\s*(.*?)\s*</script>',
             html,
             re.DOTALL,
         )
@@ -192,7 +195,10 @@ def test_generate_html_prefers_vendored_template_and_emits_single_dump_script_ta
     )
 
     assert len(matches) == 1
-    assert matches[0].group(1) == '<script type="midscene_web_dump">'
+    # 两个 type 属性,对齐 JS 报告格式(第二个 application/json 是合并工具的硬要求)
+    assert matches[0].group(1) == (
+        '<script type="midscene_web_dump" type="application/json">'
+    )
     assert "无法加载 JS 版本的 React 可视化模板" not in html, (
         "generate_html() should keep using the packaged report_template resources "
         "instead of the fallback warning page."
@@ -218,7 +224,7 @@ def test_dump_payload_escapes_all_angle_brackets_like_js_escape_script_tag():
     html = generator.generate_html()
 
     script_match = re.search(
-        r'<script type="midscene_web_dump">\s*(.*?)\s*</script>',
+        r'\n<script[^>]*type="midscene_web_dump"[^>]*>\s*(.*?)\s*</script>',
         html,
         re.DOTALL,
     )

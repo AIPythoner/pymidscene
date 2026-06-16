@@ -135,11 +135,14 @@ class WebPage(AbstractInterface):
         HiDPI 屏幕下若 dpr 未返回,所有归一化-to-像素/像素 直通路径都会
         产生系统性点击偏移,因此这里总是读取真实值.
         """
+        # 用 documentElement.clientWidth/clientHeight(排除滚动条宽度),对齐 JS
+        # base-page.ts:316-324 —— innerWidth/Height 会把经典滚动条的 15-17px 算进
+        # 去,导致归一化坐标的参考系比 JS 宽,右/下边缘出现系统性偏移。
         size_info = await self.page.evaluate(
             """
             () => ({
-                width: window.innerWidth,
-                height: window.innerHeight,
+                width: document.documentElement.clientWidth,
+                height: document.documentElement.clientHeight,
                 dpr: window.devicePixelRatio || 1
             })
             """
@@ -170,10 +173,15 @@ class WebPage(AbstractInterface):
         """
         logger.debug(f"Taking screenshot: full_page={full_page}")
 
+        # 截图前先等导航落定(对齐 JS base-page.ts:332)—— 否则刚跳转/点击后
+        # 立刻截图可能拍到旧/空白文档。timeout=10s 也对齐 JS(base-page.ts:348),
+        # 避免卡页面继承 Playwright 30s 默认而阻塞 3 倍时间。
+        await self.wait_for_navigation()
         screenshot_bytes = await self.page.screenshot(
             type="jpeg",
             quality=90,
             full_page=full_page,
+            timeout=10000,
         )
         screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
 
@@ -242,6 +250,8 @@ class WebPage(AbstractInterface):
 
         # 输入文本 —— delay=80ms 对齐 JS base-page.ts:447,避免受控输入框丢字
         await self.page.keyboard.type(text, delay=80)
+        # 输入可能触发自动提交/跳转,等导航落定(对齐 JS afterInvokeAction)
+        await self.wait_for_navigation()
 
     async def double_click(self, x: float, y: float) -> None:
         """
@@ -259,6 +269,7 @@ class WebPage(AbstractInterface):
         logger.debug(f"Right-clicking at ({x}, {y})")
         await self.page.mouse.click(x, y, button="right")
         self._mouse_ever_moved = True
+        await self.wait_for_navigation()
 
     async def drag_and_drop(
         self,
@@ -304,6 +315,7 @@ class WebPage(AbstractInterface):
         await asyncio.sleep(duration / 1000)
         await self.page.mouse.up(button="left")
         self._mouse_ever_moved = True
+        await self.wait_for_navigation()
 
     async def hover(self, x: float, y: float) -> None:
         """
@@ -317,6 +329,7 @@ class WebPage(AbstractInterface):
 
         await self.page.mouse.move(x, y)
         self._mouse_ever_moved = True
+        await self.wait_for_navigation()
 
     async def scroll(
         self,
@@ -373,6 +386,8 @@ class WebPage(AbstractInterface):
 
         # 等待滚动完成（与 JS 版本 sleep(500) 对齐）
         await asyncio.sleep(0.5)
+        # 滚动可能触发无限加载导致的跳转/重排,等导航落定(对齐 JS afterInvokeAction)
+        await self.wait_for_navigation()
 
     async def _move_to_point_before_scroll(
         self, starting_point: dict | None

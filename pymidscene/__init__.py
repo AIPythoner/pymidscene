@@ -49,7 +49,7 @@ from pymidscene.shared.types import (
 from pymidscene.shared.logger import logger
 
 # 版本信息
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 __author__ = "PyMidscene Team"
 
 __all__ = [
