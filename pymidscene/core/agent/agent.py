@@ -766,10 +766,217 @@ class Agent:
             "raw_response": result
         }
 
+    def _should_deep_think(self, deep_think: bool) -> bool:
+        """deep_think 显式开,或环境变量 MIDSCENE_FORCE_DEEP_THINK 开。"""
+        if deep_think:
+            return True
+        try:
+            from ..ai_model.service_caller import _resolve_deep_think
+            return bool(_resolve_deep_think(None))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _record_locate_ai_call(
+        self, result: dict, config: "ModelConfig", elapsed_ms: float
+    ) -> None:
+        """记录一次定位相关 AI 调用的 usage(section / element 两段共用)。"""
+        if self.session_recorder and result.get("usage"):
+            _u = result["usage"]
+            self.session_recorder.record_ai_info(
+                model=config.model_name,
+                tokens=_u.get("total_tokens"),
+                prompt_tokens=_u.get("prompt_tokens"),
+                completion_tokens=_u.get("completion_tokens"),
+                response=result.get("content", "")[:2000],
+            )
+        if self.recorder and result.get("usage"):
+            usage_info = result["usage"].copy()
+            usage_info["time_cost"] = elapsed_ms / 1000
+            usage_info["model_name"] = config.model_name
+            self.recorder.record_ai_usage(usage_info)
+
+    async def _locate_section(
+        self, prompt: str, screenshot_b64: str, img_w: int, img_h: int,
+        model_family: Optional[str], config: "ModelConfig",
+    ):
+        """deepThink 第一段:粗定位 section bbox → 合并参考框 → 扩展 → 裁剪。
+
+        Returns ``(裁剪图 base64, section_rect)`` 或 ``None``(回退到全图定位)。
+        section_rect 的 width/height 是裁剪后的真实像素尺寸,left/top 是它在全图
+        里的左上角(供第二段当偏移用)。
+        """
+        from ..ai_model.prompts import (
+            parse_section_locator_response,
+            section_locator_instruction,
+            system_prompt_to_locate_section,
+        )
+        from ...shared.utils import (
+            adapt_bbox_to_rect,
+            crop_image_base64,
+            expand_search_area,
+            merge_rects,
+        )
+        try:
+            messages = self._build_messages(
+                system_prompt=system_prompt_to_locate_section(model_family),
+                user_prompt=section_locator_instruction(prompt),
+                screenshot_b64=screenshot_b64,
+            )
+            start = time.time()
+            result = await self._call_ai_with_config_async(messages, INTENT_INSIGHT)
+            self._record_locate_ai_call(result, config, (time.time() - start) * 1000)
+
+            parsed = parse_section_locator_response(result["content"])
+            section_bbox = parsed.get("bbox")
+            if not section_bbox:
+                logger.debug(
+                    f"deepThink: section not found for '{prompt}', using full image"
+                )
+                return None
+
+            target = adapt_bbox_to_rect(
+                section_bbox, img_w, img_h, 0, 0, img_w, img_h, model_family
+            )
+            rects = [target]
+            for ref in (parsed.get("references_bbox") or []):
+                if isinstance(ref, list):
+                    rects.append(adapt_bbox_to_rect(
+                        ref, img_w, img_h, 0, 0, img_w, img_h, model_family
+                    ))
+            section_rect = expand_search_area(
+                merge_rects(rects), img_w, img_h, model_family
+            )
+            crop_b64, crop_w, crop_h = crop_image_base64(
+                screenshot_b64,
+                section_rect["left"], section_rect["top"],
+                section_rect["width"], section_rect["height"],
+                pad_to_block=(model_family == "qwen2.5-vl"),
+            )
+            section_rect["width"] = crop_w
+            section_rect["height"] = crop_h
+            logger.info(
+                f"deepThink: cropped section at "
+                f"({int(section_rect['left'])},{int(section_rect['top'])}) "
+                f"{crop_w}x{crop_h} for '{prompt}'"
+            )
+            return crop_b64, section_rect
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"deepThink section stage failed ({exc}); using full image"
+            )
+            return None
+
+    async def _locate_element_in_image(
+        self, prompt: str, image_b64: str, coord_w: int, coord_h: int,
+        offset_x: int, offset_y: int, cropped: bool,
+        model_family: Optional[str], config: "ModelConfig",
+    ):
+        """在给定图像(全图或 deepThink 裁剪图)上定位元素。
+
+        坐标空间为 ``coord_w x coord_h``;若是裁剪图,用 ``offset_x/offset_y`` 把
+        结果映射回全图。返回 ``(rect, center)`` 或 ``None``(已记录失败)。
+        auto-glm 走点坐标分支,其余走标准 bbox JSON 分支。
+        """
+        from ..ai_model.auto_glm import (
+            get_auto_glm_locate_prompt,
+            is_auto_glm,
+            parse_auto_glm_locate_response,
+        )
+        from ..ai_model.auto_glm.actions import AUTO_GLM_COORDINATE_MAX
+        from ...shared.utils import (
+            adapt_bbox,
+            adapt_bbox_to_rect,
+            calculate_center,
+            extract_json_from_code_block,
+            format_bbox,
+            js_round,
+            safe_parse_json,
+        )
+
+        use_auto_glm = is_auto_glm(model_family)
+        if use_auto_glm:
+            messages = self._build_messages(
+                system_prompt=get_auto_glm_locate_prompt(model_family),
+                user_prompt=f"Tap: {find_element_prompt(prompt)}",
+                screenshot_b64=image_b64,
+            )
+        else:
+            messages = self._build_messages(
+                system_prompt=system_prompt_to_locate_element(model_family),
+                user_prompt=find_element_prompt(prompt),
+                screenshot_b64=image_b64,
+            )
+
+        start = time.time()
+        result = await self._call_ai_with_config_async(messages, INTENT_INSIGHT)
+        elapsed_ms = (time.time() - start) * 1000
+        self._record_locate_ai_call(result, config, elapsed_ms)
+        logger.info(f"AI locate completed: {elapsed_ms:.0f}ms")
+
+        def _fail(msg: str):
+            logger.warning(f"AI locate failed: {msg}")
+            if self.recorder:
+                self.recorder.finish_task(status="failed", error=ValueError(msg))
+            if self.session_recorder:
+                self.session_recorder.fail_step(msg)
+            return None
+
+        if use_auto_glm:
+            parsed = parse_auto_glm_locate_response(result["content"])
+            coords = parsed.get("coordinates")
+            if not coords:
+                return _fail(
+                    parsed.get("error") or "auto-glm locate returned no coordinates"
+                )
+            px = js_round(coords["x"] * coord_w / AUTO_GLM_COORDINATE_MAX)
+            py = js_round(coords["y"] * coord_h / AUTO_GLM_COORDINATE_MAX)
+            x1, y1 = max(px - 5, 0), max(py - 5, 0)
+            x2, y2 = min(px + 5, coord_w), min(py + 5, coord_h)
+            left, top = x1 + offset_x, y1 + offset_y
+            rect = {
+                "left": float(left), "top": float(top),
+                "width": float(x2 - x1), "height": float(y2 - y1),
+                "right": float(left + (x2 - x1)),
+                "bottom": float(top + (y2 - y1)),
+            }
+            return rect, calculate_center(rect)
+
+        # 标准 bbox JSON 分支
+        json_text = extract_json_from_code_block(result["content"])
+        response_data = safe_parse_json(json_text)
+        if not response_data or "bbox" not in response_data:
+            # 模型按约定返回 {"bbox": [], "errors": [...]} 时带出"为什么没找到"
+            errs = response_data.get("errors") if isinstance(response_data, dict) else None
+            return _fail(
+                "; ".join(str(e) for e in errs)
+                if isinstance(errs, list) and errs
+                else "No bbox in response"
+            )
+        bbox = response_data["bbox"]
+        if not bbox or (isinstance(bbox, list) and len(bbox) < 2):
+            return _fail(f"Invalid bbox: {bbox}")
+        try:
+            if cropped:
+                # 裁剪图坐标 → 全图坐标(offset 加在 left/top)
+                rect = adapt_bbox_to_rect(
+                    bbox, coord_w, coord_h, offset_x, offset_y,
+                    coord_w, coord_h, model_family,
+                )
+            else:
+                # 默认全图路径:保持与改动前逐位一致(adapt_bbox + format_bbox)
+                adapted = adapt_bbox(
+                    bbox, coord_w, coord_h, coord_w, coord_h, model_family
+                )
+                rect = format_bbox(adapted)
+        except Exception as e:  # noqa: BLE001
+            return _fail(f"Failed to adapt bbox: {e}")
+        return rect, calculate_center(rect)
+
     async def ai_locate(
         self,
         prompt: str,
-        use_cache: bool = True
+        use_cache: bool = True,
+        deep_think: bool = False,
     ) -> Optional[LocateResultElement]:
         """
         使用 AI 定位页面元素
@@ -777,6 +984,9 @@ class Agent:
         Args:
             prompt: 元素描述（如 "登录按钮"）
             use_cache: 是否使用缓存
+            deep_think: 两段式 section-zoom 定位 —— 先粗定位一个 section、裁剪放大
+                那块图、再在裁剪图里精定位、坐标加偏移映射回全图(密集页面更准)。
+                也可由环境变量 ``MIDSCENE_FORCE_DEEP_THINK`` 触发。
 
         Returns:
             定位结果或 None
@@ -901,102 +1111,39 @@ class Agent:
         # 获取模型配置
         config = self._get_model_config(INTENT_INSIGHT)
         model_family = self._resolve_model_family(config)
-
-        # 准备消息
-        messages = self._build_messages(
-            system_prompt=system_prompt_to_locate_element(model_family),
-            user_prompt=find_element_prompt(prompt),
-            screenshot_b64=screenshot_b64
-        )
-
-        # 调用 AI
-        start_time = time.time()
-        result = await self._call_ai_with_config_async(messages, INTENT_INSIGHT)
-        elapsed_ms = (time.time() - start_time) * 1000
-
-        # 记录 AI 使用信息(含 token 细分,F1)
-        if self.session_recorder and result.get('usage'):
-            _usage = result['usage']
-            self.session_recorder.record_ai_info(
-                model=config.model_name,
-                tokens=_usage.get('total_tokens'),
-                prompt_tokens=_usage.get('prompt_tokens'),
-                completion_tokens=_usage.get('completion_tokens'),
-                response=result.get('content', '')[:2000],
-            )
-
-        if self.recorder and result.get('usage'):
-            usage_info = result['usage'].copy()
-            usage_info['time_cost'] = elapsed_ms / 1000
-            usage_info['model_name'] = config.model_name
-            self.recorder.record_ai_usage(usage_info)
-
-        logger.info(
-            f"AI locate completed: {elapsed_ms:.0f}ms, "
-            f"tokens={result.get('usage', {}).get('total_tokens', 0) if result.get('usage') else 0}"
-        )
-
-        # 解析结果
-        from ...shared.utils import safe_parse_json, extract_json_from_code_block
-        # 先提取 JSON（处理 markdown 代码块）
-        json_text = extract_json_from_code_block(result["content"])
-        response_data = safe_parse_json(json_text)
-
-        if not response_data or "bbox" not in response_data:
-            # 模型按 prompt 约定返回 {"bbox": [], "errors": ["... not found ..."]}
-            # 时,把它的"为什么没找到"带出来(对齐 JS service.locate 的 errorLog),
-            # 而不是塌成一句通用 "no bbox"。
-            errs = response_data.get("errors") if isinstance(response_data, dict) else None
-            err_msg = (
-                "; ".join(str(e) for e in errs)
-                if isinstance(errs, list) and errs
-                else "No bbox in response"
-            )
-            logger.warning(f"AI locate failed: {err_msg}")
-            if self.recorder:
-                self.recorder.finish_task(status="failed", error=ValueError(err_msg))
-            if self.session_recorder:
-                self.session_recorder.fail_step(err_msg)
-            return None
-
-        bbox = response_data["bbox"]
-        if not bbox or (isinstance(bbox, list) and len(bbox) < 2):
-            logger.warning(f"AI locate failed: invalid bbox {bbox}")
-            if self.recorder:
-                self.recorder.finish_task(status="failed", error=ValueError(f"Invalid bbox: {bbox}"))
-            if self.session_recorder:
-                self.session_recorder.fail_step(f"Invalid bbox: {bbox}")
-            return None
-
-        # 根据模型类型适配 bbox 坐标（关键：doubao 返回的是归一化 0-1000 坐标）
-        model_family = self._resolve_model_family(config)
         img_width = int(size.get('width', 1280))
         img_height = int(size.get('height', 800))
-        
-        try:
-            adapted_bbox = adapt_bbox(
-                bbox=bbox,
-                width=img_width,
-                height=img_height,
-                right_limit=img_width,
-                bottom_limit=img_height,
-                model_family=model_family
-            )
-            logger.debug(f"Adapted bbox: {bbox} -> {adapted_bbox} (model={model_family}, size={img_width}x{img_height})")
-        except Exception as e:
-            # 适配失败按"定位失败"处理. 原始值要么长度不对(format_bbox
-            # 直接抛 ValueError 逃出 ai_locate), 要么是 0-1000 归一化坐标
-            # 被当像素用 → 必然点错.
-            logger.warning(f"Failed to adapt bbox {bbox}: {e}")
-            if self.recorder:
-                self.recorder.finish_task(status="failed", error=e)
-            if self.session_recorder:
-                self.session_recorder.fail_step(f"Failed to adapt bbox: {e}")
-            return None
 
-        # 转换为 Rect 和中心点
-        rect = format_bbox(adapted_bbox)
-        center = calculate_center(rect)
+        # deepThink 两段式 section-zoom:对齐 JS service.locate 的两个 guard ——
+        # 模型家族为空(纯多模态)或 auto-glm 时禁用。先在全图上粗定位 section、
+        # 裁剪放大,第二段在裁剪图上精定位、坐标加偏移映射回全图。
+        from ..ai_model.auto_glm import is_auto_glm as _is_auto_glm
+        locate_image = screenshot_b64
+        coord_w, coord_h = img_width, img_height
+        offset_x, offset_y, cropped = 0, 0, False
+        if (
+            self._should_deep_think(deep_think)
+            and model_family
+            and not _is_auto_glm(model_family)
+        ):
+            section = await self._locate_section(
+                prompt, screenshot_b64, img_width, img_height, model_family, config
+            )
+            if section is not None:
+                locate_image, section_rect = section
+                coord_w = int(section_rect["width"])
+                coord_h = int(section_rect["height"])
+                offset_x = int(section_rect["left"])
+                offset_y = int(section_rect["top"])
+                cropped = True
+
+        located = await self._locate_element_in_image(
+            prompt, locate_image, coord_w, coord_h,
+            offset_x, offset_y, cropped, model_family, config,
+        )
+        if located is None:
+            return None
+        rect, center = located
 
         element = LocateResultElement(
             description=prompt,
@@ -1078,7 +1225,8 @@ class Agent:
         prompt: str,
         use_cache: bool = True,
         max_scroll_attempts: int = 5,
-        scroll_distance: int = 500
+        scroll_distance: int = 500,
+        deep_think: bool = False,
     ) -> Optional[LocateResultElement]:
         """
         带滚动重试的智能元素定位（增强版，与 JS 版本对齐）
@@ -1107,7 +1255,9 @@ class Agent:
         # 阶段 1: 当前位置 + 向下滚动搜索
         for attempt in range(max_scroll_attempts):
             should_use_cache = use_cache and (attempt == 0)
-            element = await self.ai_locate(prompt, use_cache=should_use_cache)
+            element = await self.ai_locate(
+                prompt, use_cache=should_use_cache, deep_think=deep_think
+            )
             
             if element:
                 logger.info(
@@ -1134,7 +1284,9 @@ class Agent:
             
             # 从顶部再做 2 次尝试
             for attempt in range(2):
-                element = await self.ai_locate(prompt, use_cache=False)
+                element = await self.ai_locate(
+                    prompt, use_cache=False, deep_think=deep_think
+                )
                 if element:
                     logger.info(f"Element '{prompt}' found from top on attempt {attempt + 1}")
                     await self._scroll_element_into_view_after_locate(element)
@@ -1179,13 +1331,17 @@ class Agent:
         except Exception as e:
             logger.debug(f"XPath scrollIntoView skipped: {e}")
 
-    async def ai_click(self, prompt: str, enable_scroll_retry: bool = True) -> bool:
+    async def ai_click(
+        self, prompt: str, enable_scroll_retry: bool = True,
+        deep_think: bool = False,
+    ) -> bool:
         """
         使用 AI 定位并点击元素
 
         Args:
             prompt: 元素描述
             enable_scroll_retry: 是否启用滚动重试（默认 True）
+            deep_think: 两段式 section-zoom 定位(密集页面更准,见 ``ai_locate``)
 
         Returns:
             是否成功
@@ -1208,10 +1364,12 @@ class Agent:
 
         # 🔑 使用滚动重试机制定位元素
         if enable_scroll_retry:
-            element = await self.ai_locate_with_scroll_retry(prompt)
+            element = await self.ai_locate_with_scroll_retry(
+                prompt, deep_think=deep_think
+            )
         else:
-            element = await self.ai_locate(prompt)
-        
+            element = await self.ai_locate(prompt, deep_think=deep_think)
+
         if not element:
             logger.error(f"Cannot locate element: {prompt}")
             if self.recorder:
@@ -1266,6 +1424,7 @@ class Agent:
         text: str,
         enable_scroll_retry: bool = True,
         mode: str = "replace",
+        deep_think: bool = False,
     ) -> bool:
         """
         使用 AI 定位并输入文本.
@@ -1299,10 +1458,12 @@ class Agent:
 
         # 🔑 使用滚动重试机制定位元素
         if enable_scroll_retry:
-            element = await self.ai_locate_with_scroll_retry(prompt)
+            element = await self.ai_locate_with_scroll_retry(
+                prompt, deep_think=deep_think
+            )
         else:
-            element = await self.ai_locate(prompt)
-        
+            element = await self.ai_locate(prompt, deep_think=deep_think)
+
         if not element:
             logger.error(f"Cannot locate element: {prompt}")
             if self.recorder:
@@ -2115,18 +2276,28 @@ class Agent:
     # H9: JS agent 公开的附加动作 API —— Python 端补齐(别名 + 特化)
     # ---------------------------------------------------------------
 
-    async def ai_tap(self, prompt: str, enable_scroll_retry: bool = True) -> bool:
+    async def ai_tap(
+        self, prompt: str, enable_scroll_retry: bool = True,
+        deep_think: bool = False,
+    ) -> bool:
         """Alias of :meth:`ai_click` — matches JS ``aiTap``."""
-        return await self.ai_click(prompt, enable_scroll_retry=enable_scroll_retry)
+        return await self.ai_click(
+            prompt, enable_scroll_retry=enable_scroll_retry, deep_think=deep_think
+        )
 
-    async def ai_hover(self, prompt: str, enable_scroll_retry: bool = True) -> bool:
+    async def ai_hover(
+        self, prompt: str, enable_scroll_retry: bool = True,
+        deep_think: bool = False,
+    ) -> bool:
         """Locate by prompt and hover over the element (JS ``aiHover``)."""
         if self.session_recorder:
             self.session_recorder.start_step("hover", prompt)
         if enable_scroll_retry:
-            element = await self.ai_locate_with_scroll_retry(prompt)
+            element = await self.ai_locate_with_scroll_retry(
+                prompt, deep_think=deep_think
+            )
         else:
-            element = await self.ai_locate(prompt)
+            element = await self.ai_locate(prompt, deep_think=deep_think)
         if not element:
             if self.session_recorder:
                 self.session_recorder.fail_step(f"Cannot locate: {prompt}")
@@ -2137,15 +2308,18 @@ class Agent:
         return True
 
     async def ai_right_click(
-        self, prompt: str, enable_scroll_retry: bool = True
+        self, prompt: str, enable_scroll_retry: bool = True,
+        deep_think: bool = False,
     ) -> bool:
         """Right-click an element (JS ``aiRightClick``)."""
         if self.session_recorder:
             self.session_recorder.start_step("rightClick", prompt)
         if enable_scroll_retry:
-            element = await self.ai_locate_with_scroll_retry(prompt)
+            element = await self.ai_locate_with_scroll_retry(
+                prompt, deep_think=deep_think
+            )
         else:
-            element = await self.ai_locate(prompt)
+            element = await self.ai_locate(prompt, deep_think=deep_think)
         if not element:
             if self.session_recorder:
                 self.session_recorder.fail_step(f"Cannot locate: {prompt}")
@@ -2160,15 +2334,18 @@ class Agent:
         return True
 
     async def ai_double_click(
-        self, prompt: str, enable_scroll_retry: bool = True
+        self, prompt: str, enable_scroll_retry: bool = True,
+        deep_think: bool = False,
     ) -> bool:
         """Double-click an element (JS ``aiDoubleClick``)."""
         if self.session_recorder:
             self.session_recorder.start_step("doubleClick", prompt)
         if enable_scroll_retry:
-            element = await self.ai_locate_with_scroll_retry(prompt)
+            element = await self.ai_locate_with_scroll_retry(
+                prompt, deep_think=deep_think
+            )
         else:
-            element = await self.ai_locate(prompt)
+            element = await self.ai_locate(prompt, deep_think=deep_think)
         if not element:
             if self.session_recorder:
                 self.session_recorder.fail_step(f"Cannot locate: {prompt}")

@@ -689,6 +689,117 @@ def calculate_center(rect: Dict[str, float]) -> tuple:
     return (x, y)
 
 
+# ==================== deepThink section-zoom 几何/图像 helper ====================
+# 对应 JS packages/core/src/common.ts (mergeRects / expandSearchArea) 与
+# packages/shared/src/img/transform.ts (cropByRect / paddingToMatchBlock)。
+
+
+def merge_rects(rects: List[Dict[str, float]]) -> Dict[str, float]:
+    """把多个 rect 合并成它们的外接矩形(对齐 JS mergeRects)。"""
+    min_left = min(r["left"] for r in rects)
+    min_top = min(r["top"] for r in rects)
+    max_right = max(r["left"] + r["width"] for r in rects)
+    max_bottom = max(r["top"] + r["height"] for r in rects)
+    return {
+        "left": min_left,
+        "top": min_top,
+        "width": max_right - min_left,
+        "height": max_bottom - min_top,
+    }
+
+
+def expand_search_area(
+    rect: Dict[str, float],
+    screen_width: int,
+    screen_height: int,
+    model_family: Optional[str] = None,
+) -> Dict[str, float]:
+    """把 rect 向四周扩到最小边长并夹在屏幕内(对齐 JS expandSearchArea)。
+
+    最小边 500px(qwen3-vl 用 1200);不足时对称补到该边长,足够时各补 160px。
+    """
+    min_edge_size = 1200 if model_family == "qwen3-vl" else 500
+    default_padding = 160
+    pad_h = (
+        math.ceil((min_edge_size - rect["width"]) / 2)
+        if rect["width"] < min_edge_size
+        else default_padding
+    )
+    pad_v = (
+        math.ceil((min_edge_size - rect["height"]) / 2)
+        if rect["height"] < min_edge_size
+        else default_padding
+    )
+    new_width = max(min_edge_size, rect["width"] + pad_h * 2)
+    new_height = max(min_edge_size, rect["height"] + pad_v * 2)
+    new_left = rect["left"] - pad_h
+    new_top = rect["top"] - pad_v
+    # 先按整块平移回屏幕内, 再按需收缩尺寸(顺序对齐 JS)。
+    if new_left + new_width > screen_width:
+        new_left = screen_width - new_width
+    if new_top + new_height > screen_height:
+        new_top = screen_height - new_height
+    new_left = max(0, new_left)
+    new_top = max(0, new_top)
+    if new_left + new_width > screen_width:
+        new_width = screen_width - new_left
+    if new_top + new_height > screen_height:
+        new_height = screen_height - new_top
+    return {
+        "left": new_left,
+        "top": new_top,
+        "width": new_width,
+        "height": new_height,
+    }
+
+
+def _pad_to_match_block(image: "Image.Image", block_size: int = 28) -> "Image.Image":
+    """把图片宽高向上取整到 block_size 的倍数, 不足处用白色填(对齐 JS paddingToMatchBlock)。"""
+    w, h = image.size
+    target_w = math.ceil(w / block_size) * block_size
+    target_h = math.ceil(h / block_size) * block_size
+    if (target_w, target_h) == (w, h):
+        return image
+    canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
+    canvas.paste(image, (0, 0))
+    return canvas
+
+
+def crop_image_base64(
+    base64_str: str,
+    left: float,
+    top: float,
+    width: float,
+    height: float,
+    pad_to_block: bool = False,
+) -> Tuple[str, int, int]:
+    """裁剪 base64 图像到给定矩形(对齐 JS cropByRect)。
+
+    Returns:
+        ``(cropped_base64_jpeg, actual_width, actual_height)`` —— 宽高是裁剪
+        (+ 可选 28 块对齐填充)后的真实像素尺寸,供第二段定位当坐标空间用。
+    """
+    image_data = base64.b64decode(base64_str)
+    image = Image.open(BytesIO(image_data)).convert("RGB")
+    img_w, img_h = image.size
+
+    # 先把左上角夹进 [0, img-1], 再算右下角并保证至少 1px —— 否则当 left/top
+    # 落在图像边缘或之外时(box_left>=img_w),裸 crop 会抛 "right < left" /
+    # "empty image"。对齐 JS cropByRect 的不崩语义。
+    box_left = min(max(0, int(left)), max(0, img_w - 1))
+    box_top = min(max(0, int(top)), max(0, img_h - 1))
+    box_right = max(box_left + 1, min(img_w, int(left + width)))
+    box_bottom = max(box_top + 1, min(img_h, int(top + height)))
+
+    cropped = image.crop((box_left, box_top, box_right, box_bottom))
+    if pad_to_block:
+        cropped = _pad_to_match_block(cropped, 28)
+    out_w, out_h = cropped.size
+    buffer = BytesIO()
+    cropped.save(buffer, format="JPEG", quality=90)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8"), out_w, out_h
+
+
 __all__ = [
     "js_round",
     "calculate_hash",
@@ -711,5 +822,8 @@ __all__ = [
     "adapt_bbox_to_rect",
     "format_bbox",
     "calculate_center",
+    "merge_rects",
+    "expand_search_area",
+    "crop_image_base64",
     "DEFAULT_BBOX_SIZE",
 ]

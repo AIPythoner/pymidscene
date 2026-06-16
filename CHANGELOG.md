@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-17
+
+感知层 JS 对齐第二批:实现 JS 的 **deepThink 两段式 section-zoom 定位** 与
+**auto-glm locate 分支**(感知审查里最大的两项)。这是动 locate 主链路的较大
+特性(opt-in,故升 minor)。先 Understand workflow 精读 JS 两边契约,实现后经
+对抗审查(20 发现 / 1 确认),修完才发布。默认定位路径保持逐位不变。
+
+### Added
+
+- **deepThink 两段式 section-zoom 定位**(对齐 JS `service.locate` + `AiLocateSection`):
+  `ai_locate(deep_think=True)`(或环境变量 `MIDSCENE_FORCE_DEEP_THINK`)先在全图
+  粗定位一个 section、合并参考框、扩到最小边(500px;qwen3-vl 用 1200)、裁剪放大
+  那块图,第二段在裁剪图上精定位,坐标加偏移映射回全图 —— 密集页面(长列表/表格/
+  多卡片)上定位更准。`deep_think` 已串进 `ai_click` / `ai_tap` / `ai_hover` /
+  `ai_right_click` / `ai_double_click` / `ai_input` / `ai_locate_with_scroll_retry`。
+  两个 guard 对齐 JS:模型家族为空(纯多模态)或 auto-glm 时禁用 section 段。
+- **auto-glm 作为 insight/locate 模型**:`ai_locate` 新增 auto-glm 专用分支(`Tap: `
+  前缀 prompt + 点坐标解析 + point→pixel 转换),此前把 auto-glm 配成 web grounding
+  模型会因期望 bbox JSON 而定位失败(helper 早已就位但没接线)。
+- 新几何/图像 helper:`merge_rects` / `expand_search_area` / `crop_image_base64`
+  (含 28 块对齐填充,对齐 JS mergeRects/expandSearchArea/cropByRect)。
+
+### Fixed
+
+- `crop_image_base64` 当裁剪框左上角落在图像边缘或之外时此前会崩(裸 PIL crop 抛
+  "right < left" / "empty image");现先夹住左上角再算右下角并保证至少 1px 合法
+  裁剪(对齐 JS cropByRect 不崩语义)。
+
 ## [0.5.1] - 2026-06-16
 
 感知层(insight / extraction / locate)JS 保真对齐第一批。对前几轮未专门审过的
