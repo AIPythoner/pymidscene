@@ -1543,6 +1543,389 @@ class Agent:
             return {"pass": False, "thought": thought, "message": error_msg}
         raise AssertionError(error_msg)
 
+    @staticmethod
+    def _readable_time() -> str:
+        """人类可读时间戳(对齐 JS getReadableTimeString,用于 replan 反馈消息)。"""
+        from datetime import datetime
+        # 带格式后缀(对齐 JS getReadableTimeString 与 prompt 里的示例)。
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S") + " (YYYY-MM-DD HH:mm:ss)"
+
+    @staticmethod
+    def _snapshot_history(
+        history: List[Dict[str, Any]], max_images: Optional[int] = 2
+    ) -> List[Dict[str, Any]]:
+        """对话历史快照:只保留最近 ``max_images`` 张截图,更早的降级为占位文本。
+
+        对齐 JS ConversationHistory.snapshot:从最新往旧数,超过上限的 image_url
+        替换成 '(image ignored due to size optimization)',控制 token 体积。
+        ``max_images=None`` 表示不限制(deepThink)。
+        """
+        import copy
+
+        cloned = copy.deepcopy(history)
+        if max_images is None:
+            return cloned
+        image_count = 0
+        for msg in reversed(cloned):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            # 外层从新到旧;消息内 content 正向遍历(对齐 JS snapshot,
+            # 单条消息含多图时与 JS 保留同一批)。
+            for j in range(len(content)):
+                part = content[j]
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    image_count += 1
+                    if image_count > max_images:
+                        content[j] = {
+                            "type": "text",
+                            "text": "(image ignored due to size optimization)",
+                        }
+        return cloned
+
+    async def _ai_act_xml_loop(
+        self,
+        task_prompt: str,
+        planner_config: "ModelConfig",
+        max_replan_cycles: int,
+    ) -> List[Dict[str, Any]]:
+        """默认规划器:JS XML 单动作契约 + 单动作 replan 循环。
+
+        每轮只规划一个动作,执行后重新截图再规划,直到模型返回 ``complete-task``。
+        对话历史是带截图的多轮消息列表(模型上一轮的原始 XML 含 ``<note>``,据此
+        把信息带到后续步骤);只保留最近 2 张截图。返回所有成功执行的动作(供缓存)。
+        """
+        from ..ai_model.prompts.planner import (
+            parse_planning_response,
+            plan_task_prompt,
+            system_prompt_to_plan,
+        )
+
+        model_family = planner_config.model_family
+        system_prompt = system_prompt_to_plan()
+        user_instruction = plan_task_prompt(task_prompt)
+
+        all_executed_actions: List[Dict[str, Any]] = []
+        history: List[Dict[str, Any]] = []
+        pending_feedback: Optional[str] = None
+        replan_count = 0
+        action_error_count = 0
+        parse_error_count = 0
+
+        while True:
+            # 1. 截图(默认规划器基于 prompt 定位,不需要 size 做 bbox 适配)
+            screenshot_b64, _size = await self._capture_ai_screenshot()
+            if self.session_recorder:
+                self.session_recorder.record_screenshot_before(screenshot_b64)
+
+            # 2. 把本轮反馈 + 当前截图追加进历史
+            if pending_feedback:
+                feedback_text = (
+                    f"{pending_feedback}. The last screenshot is attached. "
+                    f"Please going on according to the instruction."
+                )
+                pending_feedback = None
+            else:
+                feedback_text = "this is the latest screenshot"
+            history.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": feedback_text},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{screenshot_b64}"
+                        },
+                    },
+                ],
+            })
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_instruction},
+                *self._snapshot_history(history, max_images=2),
+            ]
+
+            # 3. 调用模型
+            start_time = time.time()
+            result = await self._call_ai_with_config_async(
+                messages, INTENT_PLANNING
+            )
+            elapsed_ms = (time.time() - start_time) * 1000
+            raw = result.get("content", "") or ""
+
+            # 把模型原始 XML 追加进历史(含 <note>,供后续步骤参考)
+            history.append({"role": "assistant", "content": raw})
+
+            if self.recorder and result.get("usage"):
+                usage_info = result["usage"].copy()
+                usage_info["time_cost"] = elapsed_ms / 1000
+                usage_info["model_name"] = planner_config.model_name
+                self.recorder.record_ai_usage(usage_info)
+            if self.session_recorder and result.get("usage"):
+                _u = result["usage"]
+                self.session_recorder.record_ai_info(
+                    model=planner_config.model_name,
+                    tokens=_u.get("total_tokens"),
+                    prompt_tokens=_u.get("prompt_tokens"),
+                    completion_tokens=_u.get("completion_tokens"),
+                    response=raw[:2000],
+                )
+
+            # 4. 解析 XML 单动作响应
+            try:
+                plan = parse_planning_response(raw, model_family)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Failed to parse XML planning response: {e}")
+                logger.debug(f"Raw response: {raw[:500]}")
+                parse_error_count += 1
+                if parse_error_count > 2:
+                    raise RuntimeError(
+                        f"Failed to parse AI planning response for "
+                        f"'{task_prompt}' after {parse_error_count} attempts: {e}"
+                    ) from e
+                pending_feedback = (
+                    f"Time: {self._readable_time()}, your previous response "
+                    f"could not be parsed ({e}). Please answer strictly in the "
+                    f"required XML format."
+                )
+                replan_count += 1
+                if replan_count > max_replan_cycles:
+                    raise RuntimeError(
+                        f"Max replan cycles ({max_replan_cycles}) exceeded for "
+                        f"task: '{task_prompt}'."
+                    ) from e
+                continue
+
+            log_msg = plan.get("log")
+            if log_msg:
+                logger.info(f"Act: {log_msg}")
+
+            # 5. <error> / complete-task success=false → 抛错(对齐 JS tasks.ts)
+            error_tag = plan.get("error")
+            if error_tag:
+                raise RuntimeError(
+                    f"Failed to continue: {error_tag}\n{log_msg or ''}"
+                )
+            if plan.get("finalizeSuccess") is False:
+                raise RuntimeError(
+                    f"Task failed: "
+                    f"{plan.get('finalizeMessage') or 'No error message provided'}"
+                    f"\n{log_msg or ''}"
+                )
+
+            actions = plan.get("actions", [])
+            should_continue = plan.get("shouldContinuePlanning", True)
+
+            # 6. 执行该单动作(0 或 1 个)
+            if actions:
+                action = actions[0]
+                action_type = action.get("type", "")
+                param = action.get("param", {})
+                thought = action.get("thought", "")
+                logger.info(f"Executing action: {action_type} - {thought}")
+                success = await self._execute_planned_action(action_type, param)
+                if success:
+                    all_executed_actions.append(action)
+                else:
+                    logger.warning(
+                        f"Action failed: {action_type} with param {param}"
+                    )
+                    action_error_count += 1
+                    if action_error_count > 5:
+                        raise RuntimeError(
+                            f"Too many action failures ({action_error_count}) "
+                            f"while executing '{task_prompt}'"
+                        )
+                    pending_feedback = (
+                        f"Time: {self._readable_time()}, error executing the "
+                        f"previous action ({action_type}). Please try to recover."
+                    )
+
+            # 7. 终止:仅 complete-task(success=true)结束;否则继续 replan
+            if not should_continue:
+                logger.info(f"AI Act completed: '{task_prompt}'")
+                break
+
+            replan_count += 1
+            if replan_count > max_replan_cycles:
+                raise RuntimeError(
+                    f"Max replan cycles ({max_replan_cycles}) exceeded for task: "
+                    f"'{task_prompt}' — task is incomplete. Raise "
+                    f"MIDSCENE_REPLANNING_CYCLE_LIMIT if the task legitimately "
+                    f"needs more steps."
+                )
+
+            if not pending_feedback:
+                pending_feedback = (
+                    f"Time: {self._readable_time()}, I have finished the action "
+                    f"previously planned."
+                )
+            await asyncio.sleep(0.5)
+
+        return all_executed_actions
+
+    async def _ai_act_legacy_loop(
+        self,
+        task_prompt: str,
+        use_ui_tars: bool,
+        use_auto_glm: bool,
+        planner_config: "ModelConfig",
+        max_replan_cycles: int,
+    ) -> List[Dict[str, Any]]:
+        """UI-TARS / auto-glm 规划器:沿用原批量循环(各自的 Thought:/Action: 语法)。
+
+        这两类模型每次也是一步一动作,但用自己的文本/XML 语法和截图绝对坐标,
+        与默认 XML 契约不同,故保留独立循环。返回所有成功执行的动作。
+        """
+        from ..ai_model.auto_glm import (
+            get_auto_glm_plan_prompt,
+            parse_auto_glm_planning,
+        )
+        from ..ai_model.prompts.ui_tars_planning import (
+            get_ui_tars_planning_prompt,
+        )
+        from ..ai_model.ui_tars_planning import parse_ui_tars_planning
+
+        replan_count = 0
+        action_error_count = 0
+        conversation_history: List[str] = []
+        all_executed_actions: List[Dict[str, Any]] = []
+
+        while True:
+            screenshot_b64, size = await self._capture_ai_screenshot()
+            if self.session_recorder:
+                self.session_recorder.record_screenshot_before(screenshot_b64)
+
+            history_suffix = (
+                "\n\nHistory:\n" + "\n".join(conversation_history)
+                if conversation_history else ""
+            )
+            if use_ui_tars:
+                messages = self._build_messages(
+                    system_prompt=get_ui_tars_planning_prompt()
+                    + task_prompt + history_suffix,
+                    user_prompt="",
+                    screenshot_b64=screenshot_b64,
+                )
+            else:
+                messages = self._build_messages(
+                    system_prompt=get_auto_glm_plan_prompt(
+                        planner_config.model_family
+                    ),
+                    user_prompt=task_prompt + history_suffix,
+                    screenshot_b64=screenshot_b64,
+                )
+
+            start_time = time.time()
+            config = self._get_model_config(INTENT_PLANNING)
+            result = await self._call_ai_with_config_async(
+                messages, INTENT_PLANNING
+            )
+            elapsed_ms = (time.time() - start_time) * 1000
+            logger.info(
+                f"AI planning completed: {elapsed_ms:.0f}ms, "
+                f"tokens={result.get('usage', {}).get('total_tokens', 0) if result.get('usage') else 0}"
+            )
+
+            if self.recorder and result.get("usage"):
+                usage_info = result["usage"].copy()
+                usage_info["time_cost"] = elapsed_ms / 1000
+                usage_info["model_name"] = config.model_name
+                self.recorder.record_ai_usage(usage_info)
+            if self.session_recorder and result.get("usage"):
+                _usage = result["usage"]
+                self.session_recorder.record_ai_info(
+                    model=config.model_name,
+                    tokens=_usage.get("total_tokens"),
+                    prompt_tokens=_usage.get("prompt_tokens"),
+                    completion_tokens=_usage.get("completion_tokens"),
+                    response=result.get("content", "")[:2000],
+                )
+
+            try:
+                if use_ui_tars:
+                    plan_result = parse_ui_tars_planning(result["content"], size)
+                else:
+                    plan_result = parse_auto_glm_planning(result["content"], size)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Failed to parse planning response: {e}")
+                logger.debug(f"Raw response: {result['content'][:500]}")
+                conversation_history.append(f"Planning parse error: {e}")
+                if replan_count >= 2:
+                    raise RuntimeError(
+                        f"Failed to parse AI planning response for "
+                        f"'{task_prompt}' after {replan_count + 1} attempts: {e}"
+                    ) from e
+                replan_count += 1
+                continue
+
+            actions = plan_result.get("actions", [])
+            should_continue = plan_result.get("shouldContinuePlanning", False)
+
+            if not actions:
+                if not should_continue:
+                    logger.info(
+                        "Planner returned no actions and no further planning "
+                        "— treating task as complete"
+                    )
+                    break
+                logger.warning("AI returned empty action plan")
+                conversation_history.append("No actions planned")
+                if replan_count >= 2:
+                    raise RuntimeError(
+                        f"AI planning produced empty action plan for "
+                        f"'{task_prompt}' after {replan_count + 1} attempts — "
+                        f"model may be refusing the task or the prompt is "
+                        f"under-specified."
+                    )
+                replan_count += 1
+                continue
+
+            for action in actions:
+                action_type = action.get("type", "")
+                param = action.get("param", {})
+                thought = action.get("thought", "")
+                logger.info(f"Executing action: {action_type} - {thought}")
+                success = await self._execute_planned_action(action_type, param)
+                if success:
+                    conversation_history.append(
+                        f"Executed: {action_type} ({thought})"
+                    )
+                    all_executed_actions.append(action)
+                else:
+                    logger.warning(
+                        f"Action failed: {action_type} with param {param}"
+                    )
+                    conversation_history.append(
+                        f"Action failed: {action_type} ({thought}) - will retry on next replan"
+                    )
+                    action_error_count += 1
+                    if action_error_count > 5:
+                        raise RuntimeError(
+                            f"Too many action failures ({action_error_count}) "
+                            f"while executing '{task_prompt}'"
+                        )
+                    should_continue = True
+                    break
+
+            if not should_continue:
+                logger.info(f"AI Act completed: '{task_prompt}'")
+                break
+
+            replan_count += 1
+            if replan_count > max_replan_cycles:
+                raise RuntimeError(
+                    f"Max replan cycles ({max_replan_cycles}) exceeded for task: "
+                    f"'{task_prompt}' — task is incomplete. Raise "
+                    f"MIDSCENE_REPLANNING_CYCLE_LIMIT if the task legitimately "
+                    f"needs more steps."
+                )
+            logger.info(f"Replanning (cycle {replan_count}/{max_replan_cycles})")
+            await asyncio.sleep(0.5)
+
+        return all_executed_actions
+
     async def ai_act(
         self,
         task_prompt: str,
@@ -1570,20 +1953,7 @@ class Agent:
         Returns:
             是否成功
         """
-        from ..ai_model.prompts.planner import (
-            system_prompt_to_plan,
-            plan_task_prompt,
-            parse_planning_response,
-        )
-        from ..ai_model.prompts.ui_tars_planning import (
-            get_ui_tars_planning_prompt,
-        )
-        from ..ai_model.ui_tars_planning import parse_ui_tars_planning
-        from ..ai_model.auto_glm import (
-            get_auto_glm_plan_prompt,
-            parse_auto_glm_planning,
-            is_auto_glm,
-        )
+        from ..ai_model.auto_glm import is_auto_glm
         from ...shared.utils import is_ui_tars as _is_ui_tars_family
 
         logger.info(f"AI Act: '{task_prompt}'")
@@ -1664,195 +2034,19 @@ class Agent:
             max_replan_cycles = 40
         else:
             max_replan_cycles = 20
-        replan_count = 0
-        action_error_count = 0  # 对齐 JS errorCountInOnePlanningLoop(上限 5)
-        conversation_history: List[str] = []
-        all_executed_actions: List[Dict[str, Any]] = []  # 收集所有执行的动作，用于缓存
+        all_executed_actions: List[Dict[str, Any]] = []
 
         try:
-            while True:
-                # 1. 截图 + 获取页面信息（CSS 归一化）
-                screenshot_b64, size = await self._capture_ai_screenshot()
-
-                if self.session_recorder:
-                    self.session_recorder.record_screenshot_before(screenshot_b64)
-
-                # 2. 调用 AI 规划 —— UI-TARS / auto-glm 走各自的专用 prompt/parser
-                history_suffix = (
-                    "\n\nHistory:\n" + "\n".join(conversation_history)
-                    if conversation_history else ""
+            # 规划循环:默认走 XML 单动作契约;UI-TARS / auto-glm 走各自的循环。
+            if _use_ui_tars or _use_auto_glm:
+                all_executed_actions = await self._ai_act_legacy_loop(
+                    task_prompt, _use_ui_tars, _use_auto_glm,
+                    _planner_config, max_replan_cycles,
                 )
-                if _use_ui_tars:
-                    messages = self._build_messages(
-                        system_prompt=get_ui_tars_planning_prompt() + task_prompt + history_suffix,
-                        user_prompt="",
-                        screenshot_b64=screenshot_b64,
-                    )
-                elif _use_auto_glm:
-                    messages = self._build_messages(
-                        system_prompt=get_auto_glm_plan_prompt(
-                            _planner_config.model_family
-                        ),
-                        user_prompt=task_prompt + history_suffix,
-                        screenshot_b64=screenshot_b64,
-                    )
-                else:
-                    messages = self._build_messages(
-                        system_prompt=system_prompt_to_plan(),
-                        user_prompt=plan_task_prompt(
-                            task_prompt, conversation_history or None
-                        ),
-                        screenshot_b64=screenshot_b64,
-                    )
-
-                start_time = time.time()
-                config = self._get_model_config(INTENT_PLANNING)
-                result = await self._call_ai_with_config_async(
-                    messages, INTENT_PLANNING
+            else:
+                all_executed_actions = await self._ai_act_xml_loop(
+                    task_prompt, _planner_config, max_replan_cycles,
                 )
-                elapsed_ms = (time.time() - start_time) * 1000
-
-                logger.info(
-                    f"AI planning completed: {elapsed_ms:.0f}ms, "
-                    f"tokens={result.get('usage', {}).get('total_tokens', 0) if result.get('usage') else 0}"
-                )
-
-                # 记录 AI 使用
-                if self.recorder and result.get('usage'):
-                    usage_info = result['usage'].copy()
-                    usage_info['time_cost'] = elapsed_ms / 1000
-                    usage_info['model_name'] = config.model_name
-                    self.recorder.record_ai_usage(usage_info)
-
-                if self.session_recorder and result.get('usage'):
-                    _usage = result['usage']
-                    self.session_recorder.record_ai_info(
-                        model=config.model_name,
-                        tokens=_usage.get('total_tokens'),
-                        prompt_tokens=_usage.get('prompt_tokens'),
-                        completion_tokens=_usage.get('completion_tokens'),
-                        response=result.get('content', '')[:2000],
-                    )
-
-                # 3. 解析规划结果
-                try:
-                    if _use_ui_tars:
-                        plan_result = parse_ui_tars_planning(
-                            result["content"], size
-                        )
-                    elif _use_auto_glm:
-                        plan_result = parse_auto_glm_planning(
-                            result["content"], size
-                        )
-                    else:
-                        plan_result = parse_planning_response(result["content"])
-                except Exception as e:
-                    logger.error(f"Failed to parse planning response: {e}")
-                    logger.debug(f"Raw response: {result['content'][:500]}")
-                    conversation_history.append(f"Planning parse error: {e}")
-                    # 对齐 JS tasks.ts:369: 规划响应反复解析失败直接报错.
-                    # 旧版降级为 ai_click 会把任意 act 任务变成一次不可预测
-                    # 的点击并报告"成功".
-                    if replan_count >= 2:
-                        raise RuntimeError(
-                            f"Failed to parse AI planning response for "
-                            f"'{task_prompt}' after {replan_count + 1} "
-                            f"attempts: {e}"
-                        ) from e
-                    replan_count += 1
-                    continue
-
-                actions = plan_result.get("actions", [])
-                should_continue = plan_result.get("shouldContinuePlanning", False)
-
-                if not actions:
-                    # 对齐 JS tasks.ts:394,442-444: 空动作 + 不再继续规划
-                    # 是合法的"无事可做/任务已完成"信号(例如"有弹窗就关掉"
-                    # 而页面没有弹窗), 正常结束而不是报错.
-                    if not should_continue:
-                        logger.info(
-                            "Planner returned no actions and no further "
-                            "planning — treating task as complete"
-                        )
-                        break
-                    logger.warning("AI returned empty action plan")
-                    conversation_history.append("No actions planned")
-                    # H4:连续两次空计划 → 视为规划失败,**不**静默返回 True.
-                    # JS 等价路径会抛 TaskExecutionError;Python 这里抛 RuntimeError.
-                    if replan_count >= 2:
-                        raise RuntimeError(
-                            f"AI planning produced empty action plan for "
-                            f"'{task_prompt}' after {replan_count + 1} attempts — "
-                            f"model may be refusing the task or the prompt is "
-                            f"under-specified."
-                        )
-                    replan_count += 1
-                    continue
-
-                # 4. 执行每个规划的动作 —— 对齐 JS tasks.ts:423-439:
-                # 同批中某个动作失败即中断本批(后续动作往往依赖前一步的
-                # 结果, 基于失败状态继续执行会把页面打乱), 错误进入 replan;
-                # 一次 ai_act 内累计失败超过 5 次(JS errorCountInOnePlanningLoop)
-                # 整体报错.
-                for action in actions:
-                    action_type = action.get("type", "")
-                    param = action.get("param", {})
-                    thought = action.get("thought", "")
-
-                    logger.info(f"Executing action: {action_type} - {thought}")
-
-                    success = await self._execute_planned_action(
-                        action_type, param
-                    )
-
-                    # 先执行,再把结果追加到对话历史和缓存列表 —— 失败不入缓存,
-                    # 避免下轮 replan 基于"已执行(实际失败)"的错觉做规划,也避免
-                    # 把失败的动作固化到 cache.yaml.
-                    if success:
-                        conversation_history.append(
-                            f"Executed: {action_type} ({thought})"
-                        )
-                        all_executed_actions.append(action)
-                    else:
-                        logger.warning(
-                            f"Action failed: {action_type} with param {param}"
-                        )
-                        conversation_history.append(
-                            f"Action failed: {action_type} ({thought}) - will retry on next replan"
-                        )
-                        action_error_count += 1
-                        if action_error_count > 5:
-                            raise RuntimeError(
-                                f"Too many action failures "
-                                f"({action_error_count}) while executing "
-                                f"'{task_prompt}'"
-                            )
-                        should_continue = True  # 失败后必须 replan
-                        break
-
-                # 5. 检查是否需要继续规划
-                if not should_continue:
-                    logger.info(f"AI Act completed: '{task_prompt}'")
-                    break
-
-                # 6. Replan
-                replan_count += 1
-                if replan_count > max_replan_cycles:
-                    # 对齐 JS tasks.ts:449-452 / task-runner.ts:363:
-                    # 任务没完成(模型仍要求继续)必须报错, 不能返回成功,
-                    # 更不能把执行到一半的动作序列固化进缓存.
-                    raise RuntimeError(
-                        f"Max replan cycles ({max_replan_cycles}) exceeded "
-                        f"for task: '{task_prompt}' — task is incomplete. "
-                        f"Raise MIDSCENE_REPLANNING_CYCLE_LIMIT if the task "
-                        f"legitimately needs more steps."
-                    )
-
-                logger.info(
-                    f"Replanning (cycle {replan_count}/{max_replan_cycles})"
-                )
-                # 等待页面稳定后再截图
-                await asyncio.sleep(0.5)
 
             # ==================== 缓存写入（与 JS 版本对齐） ====================
             if (
@@ -2109,6 +2303,11 @@ class Agent:
         "Scroll": "aiScroll",
         "DragAndDrop": "aiDragAndDrop",
         "Sleep": "Sleep",
+        # 默认 XML planner 也会规划这两类,必须能进/出缓存(否则回放缺步骤):
+        # LongPress 用 verb 作 flow key(对齐 JS interfaceAlias 缺省回落 verb);
+        # Assert 走 aiAssert(condition 作为普通 param 字段往返)。
+        "LongPress": "LongPress",
+        "Assert": "aiAssert",
     }
     # 读取侧反向映射, 额外接受 yaml 脚本里的小写 `sleep` 内置项.
     _ACTION_TYPE_BY_FLOW_KEY = {

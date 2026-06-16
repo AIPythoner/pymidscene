@@ -37,7 +37,10 @@ def test_locator_and_planner_prompts_use_preferred_language(monkeypatch) -> None
         'box_2d bounding box for the target element, should be '
         '[ymin, xmin, ymax, xmax] normalized to 0-1000.'
     ) in locator_prompt
-    assert 'Use English for the "thought" field.' in planner_prompt
+    # 默认规划器现为 XML 单动作契约
+    assert "<action-type>" in planner_prompt
+    assert "<complete-task" in planner_prompt
+    assert "**Use English**" in planner_prompt
 
 
 def test_system_prompt_to_extract_includes_upstream_scalar_and_array_examples(

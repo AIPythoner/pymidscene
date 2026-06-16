@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-16
+
+把 **默认 LLM 规划器**从 JSON 批量动作契约重写成 Midscene.js 现行的 **XML 单动作
+契约**(finding [17])。这是对核心 agentic 循环的较大行为变更(故升 minor),公开
+API 不变(`ai_act(task) -> bool`),旧缓存仍可回放。实现后经 4 维对抗审查(17 发现
+/ 8 确认),修完全部确认项再发布。仅影响默认规划器;UI-TARS、auto-glm 各自的
+规划器与执行器、动作集、缓存格式均不变。
+
+### Changed
+
+- **默认规划器:JSON 批量 → XML 单动作契约**(对齐 JS `llm-planning.ts` /
+  `tasks.ts`):
+  - 每轮只规划 **一个** 动作,执行后重新截图再规划,直到模型返回
+    `<complete-task success="true|false">`;不再"一次规划至多 3 个动作"
+  - 模型用 XML 标签返回 `<thought>/<note>/<log>/<error>/<action-type>/`
+    `<action-param-json>/<complete-task>`;`<error>` 与 `success="false"` → 抛错
+  - 新的**对话历史**:每轮把当前截图 + 模型上一轮的原始 XML 追加进多轮消息
+    (只保留最近 2 张截图,更早降级为占位文本);`<note>` 让模型把信息带到
+    后续步骤(截图会被裁掉)
+  - `parse_planning_response` 现解析 XML(`extract_xml_tag` + complete-task
+    正则);action-param-json 复用 `safe_parse_json_with_repair`(json_repair +
+    doubao/UI-TARS bbox 预处理,与 JS safeParseJson 一致)
+  - `ai_act` 拆分:默认走 `_ai_act_xml_loop`,UI-TARS/auto-glm 走
+    `_ai_act_legacy_loop`(原批量循环原样保留),之后共用缓存写入 + 报告收尾
+
+### Fixed
+
+- 规划动作 `LongPress`、`Assert` 此前不在 `_FLOW_KEY_BY_ACTION_TYPE` 映射里 →
+  成功执行后被静默丢出缓存 YAML,回放缺步骤/漏断言。现两者都能进/出缓存往返
+- 默认规划器解析 action-param-json 现走 `safe_parse_json_with_repair`,LLM 常见的
+  尾逗号/单引号/缺括号可被修复(此前手搓的弱解析会直接报错并把任务判失败)
+- complete-task `success` 改为精确小写比较(对齐 JS `=== 'true'`)
+- 对话历史截图裁剪的内层遍历方向、`_readable_time` 的格式后缀对齐 JS
+
 ## [0.4.0] - 2026-06-16
 
 新增 `pymidscene` 命令行:用自然语言 YAML 脚本驱动 web / Android / iOS 自动化,
