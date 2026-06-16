@@ -123,13 +123,11 @@ def extract_data_prompt(
     else:
         demand_str = data_demand
 
-    prompt_parts = []
-    if page_description:
-        prompt_parts.append(
-            f"<PageDescription>\n{page_description}\n</PageDescription>"
-        )
-
-    prompt_parts.append(f"<DATA_DEMAND>\n{demand_str}\n</DATA_DEMAND>")
+    # 始终输出 PageDescription 块(对齐 JS extractDataQueryPrompt:即使为空也带)。
+    prompt_parts = [
+        f"<PageDescription>\n{page_description or ''}\n</PageDescription>",
+        f"<DATA_DEMAND>\n{demand_str}\n</DATA_DEMAND>",
+    ]
     return "\n\n".join(prompt_parts)
 
 
@@ -151,6 +149,11 @@ def parse_xml_extraction_response(xml_string: str) -> dict[str, Any]:
         match = re.search(pattern, xml, re.DOTALL | re.IGNORECASE)
         return match.group(1).strip() if match else None
 
+    # 复用 JS safeParseJson 的忠实移植(去 ```json 围栏 + json_repair 回退 +
+    # 递归 trim),而不是裸 json.loads —— 模型常把 JSON 包在代码块里/带尾逗号,
+    # 裸解析会直接报错而 JS 能恢复。
+    from ..service_caller import safe_parse_json_with_repair
+
     thought = extract_xml_tag(xml_string, "thought")
     data_json_str = extract_xml_tag(xml_string, "data-json")
     errors_str = extract_xml_tag(xml_string, "errors")
@@ -160,18 +163,18 @@ def parse_xml_extraction_response(xml_string: str) -> dict[str, Any]:
         raise ValueError("Missing required field: data-json")
 
     try:
-        data = json.loads(data_json_str)
-    except json.JSONDecodeError as e:
+        data = safe_parse_json_with_repair(data_json_str)
+    except Exception as e:  # noqa: BLE001
         raise ValueError(f"Failed to parse data-json: {e}") from e
 
     # 解析 errors（可选）
     errors: list[str] | None = None
     if errors_str:
         try:
-            parsed_errors = json.loads(errors_str)
+            parsed_errors = safe_parse_json_with_repair(errors_str)
             if isinstance(parsed_errors, list):
                 errors = parsed_errors
-        except json.JSONDecodeError:
+        except Exception:  # noqa: BLE001
             pass  # 忽略解析失败
 
     result = {"data": data}

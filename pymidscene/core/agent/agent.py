@@ -263,7 +263,8 @@ class Agent:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{screenshot_b64}"
+                            "url": f"data:image/jpeg;base64,{screenshot_b64}",
+                            "detail": "high",
                         }
                     },
                     {
@@ -942,11 +943,20 @@ class Agent:
         response_data = safe_parse_json(json_text)
 
         if not response_data or "bbox" not in response_data:
-            logger.warning(f"AI locate failed: no bbox in response")
+            # 模型按 prompt 约定返回 {"bbox": [], "errors": ["... not found ..."]}
+            # 时,把它的"为什么没找到"带出来(对齐 JS service.locate 的 errorLog),
+            # 而不是塌成一句通用 "no bbox"。
+            errs = response_data.get("errors") if isinstance(response_data, dict) else None
+            err_msg = (
+                "; ".join(str(e) for e in errs)
+                if isinstance(errs, list) and errs
+                else "No bbox in response"
+            )
+            logger.warning(f"AI locate failed: {err_msg}")
             if self.recorder:
-                self.recorder.finish_task(status="failed", error=ValueError("No bbox in response"))
+                self.recorder.finish_task(status="failed", error=ValueError(err_msg))
             if self.session_recorder:
-                self.session_recorder.fail_step("No bbox in response")
+                self.session_recorder.fail_step(err_msg)
             return None
 
         bbox = response_data["bbox"]
@@ -1634,7 +1644,8 @@ class Agent:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{screenshot_b64}"
+                            "url": f"data:image/jpeg;base64,{screenshot_b64}",
+                            "detail": "high",
                         },
                     },
                 ],
@@ -2203,10 +2214,11 @@ class Agent:
         Thin wrapper over :meth:`ai_query` that constrains the output to a
         single boolean field and returns the Python ``bool`` directly.
         """
-        parsed = await self.ai_query({
-            "value": f"boolean — answer the question: {question}",
-        })
-        val = parsed.get("data", {}).get("value") if isinstance(parsed, dict) else None
+        # demand 用 `result` 键 + 首字母大写类型前缀(对齐 JS createTypeQueryTask
+        # `{result: "Boolean, <q>"}`,也与 extractor 系统 prompt 里的示例一致 ——
+        # 之前用 `value` 键会和 prompt 示例自相矛盾,模型回 `result` 时取不到值)。
+        parsed = await self.ai_query({"result": f"Boolean, {question}"})
+        val = parsed.get("data", {}).get("result") if isinstance(parsed, dict) else None
         if isinstance(val, bool):
             return val
         if isinstance(val, str):
@@ -2215,10 +2227,8 @@ class Agent:
 
     async def ai_number(self, question: str) -> Optional[float]:
         """Ask for a numeric answer (JS ``aiNumber``). Returns float or None."""
-        parsed = await self.ai_query({
-            "value": f"number — answer as a numeric value: {question}",
-        })
-        val = parsed.get("data", {}).get("value") if isinstance(parsed, dict) else None
+        parsed = await self.ai_query({"result": f"Number, {question}"})
+        val = parsed.get("data", {}).get("result") if isinstance(parsed, dict) else None
         if isinstance(val, (int, float)):
             return float(val)
         if isinstance(val, str):
@@ -2230,10 +2240,8 @@ class Agent:
 
     async def ai_string(self, question: str) -> Optional[str]:
         """Ask for a string answer (JS ``aiString``). Returns str or None."""
-        parsed = await self.ai_query({
-            "value": f"string — answer as a string: {question}",
-        })
-        val = parsed.get("data", {}).get("value") if isinstance(parsed, dict) else None
+        parsed = await self.ai_query({"result": f"String, {question}"})
+        val = parsed.get("data", {}).get("result") if isinstance(parsed, dict) else None
         if val is None:
             return None
         return str(val)

@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-16
+
+感知层(insight / extraction / locate)JS 保真对齐第一批。对前几轮未专门审过的
+感知侧做对抗审查(24 发现 / 16 确认),先修一批清晰、低风险的真实差异。两个动
+locate 主链路的大项(deepThink 两段式 section-zoom、auto-glm locate 分支)留待
+下一轮单独做。
+
+### Fixed
+
+- **数据提取解析** `parse_xml_extraction_response` 从裸 `json.loads` 改为复用
+  `safe_parse_json_with_repair`(去 markdown 代码块围栏 + json_repair 修复 + 递归
+  trim,对齐 JS safeParseJson)—— 此前模型把 JSON 包在代码块里或带尾逗号会直接
+  报错,而 JS 能恢复
+- **`ai_boolean` / `ai_number` / `ai_string`** 的 demand 从 `{value: "boolean — …"}`
+  改成 `{result: "Boolean, …"}`(对齐 JS createTypeQueryTask,也与 extractor 系统
+  prompt 里的示例一致)—— 此前 prompt 示例用 `result` 键、代码却取 `value`,模型
+  照示例回 `result` 时会取不到值
+- locate / 规划截图的 `image_url` 补 `detail: "high"`(对齐 JS,避免供应商默认
+  `auto` 降采样削弱定位精度)
+- `ai_locate` 在模型返回 `{"bbox": [], "errors": [...]}` 时把"为什么没找到"带进
+  日志/记录(对齐 JS service.locate 的 errorLog),不再塌成通用 "no bbox"
+- `extract_data_prompt` 始终输出 `<PageDescription>` 块(对齐 JS,空也带)
+
+### Notes(留待下一轮)
+
+- **deepThink 两段式 section-zoom 定位**(AiLocateSection → 裁剪 → 带偏移重定位)
+  在 Python 尚未实现;`section_locator.py` 的 prompt 已就位但未接线。这是动 locate
+  主链路的较大特性,单独一轮做。
+- **auto-glm 作为 insight/locate 模型**时 `ai_locate` 缺专用分支(auto-glm 是
+  Android 规划模型,作 web grounding 少见);helper 已就位,与 deepThink 同轮接线。
+
 ## [0.5.0] - 2026-06-16
 
 把 **默认 LLM 规划器**从 JSON 批量动作契约重写成 Midscene.js 现行的 **XML 单动作
