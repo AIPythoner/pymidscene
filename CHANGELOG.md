@@ -36,6 +36,17 @@ API 不变(`ai_act(task) -> bool`),旧缓存仍可回放。实现后经 4 维对
 - complete-task `success` 改为精确小写比较(对齐 JS `=== 'true'`)
 - 对话历史截图裁剪的内层遍历方向、`_readable_time` 的格式后缀对齐 JS
 
+### Docs
+
+- README 增加 **CLI** 一节(`pymidscene` 跑 YAML 脚本)+ 补全示例索引(android/ios/cli)
+- CONTRIBUTING 增加"发布到 PyPI"的维护者步骤(build / twine check / 干净环境冒烟 / upload / tag)
+
+### Chore
+
+- 发版就绪:`python -m build` 干净产出 wheel+sdist(报告模板资源已打包、无多余文件),
+  `twine check` 通过,全新 venv 安装后 `import` / `pymidscene --help` / 报告生成冒烟均过
+- `pyproject.toml` 增加 `[tool.poetry.urls]`(Source / Changelog / Issues)
+
 ## [0.4.0] - 2026-06-16
 
 新增 `pymidscene` 命令行:用自然语言 YAML 脚本驱动 web / Android / iOS 自动化,

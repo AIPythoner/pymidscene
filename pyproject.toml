@@ -47,6 +47,11 @@ adbutils = {version = "^2.8.0", optional = true}
 [tool.poetry.extras]
 android = ["adbutils"]
 
+[tool.poetry.urls]
+"Source" = "https://github.com/AIPythoner/pymidscene"
+"Changelog" = "https://github.com/AIPythoner/pymidscene/blob/main/CHANGELOG.md"
+"Issues" = "https://github.com/AIPythoner/pymidscene/issues"
+
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
 pytest-asyncio = "^0.21.0"

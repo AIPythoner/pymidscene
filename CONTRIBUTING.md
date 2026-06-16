@@ -81,6 +81,33 @@ Use clear, descriptive commit messages:
 - `docs: update README with examples`
 - `test: add tests for cache system`
 
+## Publishing a Release (maintainers)
+
+```bash
+# 1. Update CHANGELOG (move [Unreleased] -> [X.Y.Z] - DATE) and bump the version
+#    in BOTH pyproject.toml and pymidscene/__init__.py (keep them in sync).
+
+# 2. Run the full test suite (from this directory)
+venv/Scripts/python.exe -m pytest tests/
+
+# 3. Build the wheel + sdist (output goes to dist/)
+python -m build
+
+# 4. Validate the artifacts and smoke-test the wheel in a clean environment
+python -m twine check dist/*
+python -m venv /tmp/pmcheck && /tmp/pmcheck/Scripts/python -m pip install dist/*.whl
+#    then from outside the repo: `import pymidscene`, `pymidscene --help`, and
+#    run tests/packaging/report_smoke.py (verifies bundled report resources load).
+
+# 5. Publish to PyPI (needs a PyPI API token)
+python -m twine upload dist/*
+
+# 6. Tag the release
+git tag vX.Y.Z && git push --tags
+```
+
+`dist/` is git-ignored — do not commit build artifacts.
+
 ## Questions?
 
 Feel free to open an issue or reach out to the maintainers.

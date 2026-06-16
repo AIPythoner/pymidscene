@@ -139,6 +139,39 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+## CLI
+
+Run automation written as YAML scripts — no Python needed — with the `pymidscene`
+command (installed with the package):
+
+```bash
+pymidscene ./script.yaml                  # run a single script
+pymidscene ./scripts/                      # run every *.yaml in a directory
+pymidscene --files a.yaml b.yaml --concurrent 2
+pymidscene --config ./suite.yaml --continue-on-error
+```
+
+A script declares one platform target (`web` / `android` / `ios`) plus `tasks`:
+
+```yaml
+web:
+  url: https://www.bing.com
+tasks:
+  - name: search
+    flow:
+      - aiInput: the search box
+        value: midscene
+      - aiKeyboardPress: Enter
+      - aiWaitFor: search results are visible
+        timeout: 15000
+      - aiQuery: "{ titles: string[] }"
+        name: results
+      - aiAssert: a list of results is shown
+```
+
+See [docs/CLI.md](docs/CLI.md) for the full flag and flow-item reference, and
+[examples/cli/](examples/cli/) for ready-to-run scripts.
+
 ## Documentation
 
 ### Core API
@@ -190,8 +223,9 @@ This means:
 Check out the [examples/](examples/) directory:
 
 - `basic_usage.py` - Getting started
-- `login_demo.py` - Login automation with visual report
-- `login_demo.html` - Test page for login demo
+- `login_demo.py` / `login_demo.html` - Login automation with a visual report
+- `android_basic.py` / `ios_basic.py` - Mobile automation
+- `cli/` - YAML scripts for the `pymidscene` CLI (web / android / suite)
 
 ## Project Structure
 
