@@ -1,0 +1,23 @@
+# 示例:用 pymidscene CLI 跑一个 web 自动化脚本
+#   pymidscene examples/cli/web-search.yaml --headed
+#
+# 模型通过环境变量配置(MIDSCENE_MODEL_NAME / _API_KEY / _BASE_URL /
+# _MODEL_FAMILY),可放在脚本同目录的 .env 里(CLI 启动时自动加载)。
+web:
+  url: https://www.bing.com
+  viewportWidth: 1280
+  viewportHeight: 800
+  # output: ./search-result.json   # 不写则落到 midscene_run/output/
+
+tasks:
+  - name: search and extract
+    flow:
+      - aiInput: the search box
+        value: midscene ai automation
+      - aiKeyboardPress: Enter
+      - sleep: 2000
+      - aiWaitFor: search results are visible
+        timeout: 15000
+      - aiQuery: "{ titles: string[] /* the result titles */ }"
+        name: results
+      - aiAssert: the page shows a list of search results

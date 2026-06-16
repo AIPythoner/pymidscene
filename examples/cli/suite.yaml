@@ -1,0 +1,14 @@
+# 示例:索引/配置 yaml,一次跑多个脚本
+#   pymidscene --config examples/cli/suite.yaml
+#
+# files 里的相对 glob 相对本文件目录解析。其余字段是该批次的默认配置,
+# 可被命令行同名 flag 覆盖。
+files:
+  - web-search.yaml
+  - "*.yaml"          # glob:本目录下所有 yaml(重复会被去重)
+
+concurrent: 2
+continueOnError: true
+headed: false
+# shareBrowserContext: true   # 多个 web 脚本共用一个浏览器会话/cookie
+summary: suite-summary.json

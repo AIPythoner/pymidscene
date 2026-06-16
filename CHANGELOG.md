@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-16
+
+新增 `pymidscene` 命令行:用自然语言 YAML 脚本驱动 web / Android / iOS 自动化,
+对齐 Midscene.js 的 `@midscene/cli`(命令面 + YAML 脚本/flow 执行契约)。实现后经
+4 维度对抗审查(36 发现 / 21 确认),修完全部确认项随特性一起发布。
+
+### Added
+
+- **`pymidscene` CLI**(`pymidscene <script.yaml>` 或 `python -m pymidscene.cli`),
+  新增 `[tool.poetry.scripts]` 入口:
+  - 三种脚本选取:位置参数(文件/目录/glob)、`--files a.yaml b.yaml`、
+    `--config suite.yaml`(索引 yaml 的 `files:` 列表;相对 glob 相对 config 目录)
+  - 标志:`--concurrent`、`--continue-on-error`、`--headed`、`--keep-window`、
+    `--share-browser-context`、`--summary`、`--dotenv-override/-debug`,以及
+    `--web.* / --android.* / --ios.*` 点号命名空间目标覆盖
+  - YAML 脚本:`web|android|ios|interface`(+ 废弃 `target`=web)+ `config`/`agent`
+    + `tasks[].flow[]`;`${VAR}` 环境插值、数字 deviceId 自动加引号、`target`→`web`
+  - flow 步骤:`ai/aiAction`、`aiTap/aiHover/aiRightClick/aiDoubleClick/aiClearInput`、
+    `aiInput`(新旧式 + mode)、`aiKeyboardPress`(可选 locate 先聚焦)、`aiScroll`、
+    `aiAssert`、`aiQuery/aiNumber/aiString/aiBoolean/aiAsk/aiLocate`、`aiWaitFor`
+    (毫秒)、`sleep`、`javascript`、`aiDragAndDrop/LongPress/Swipe`(`ai_locate` 桥接
+    坐标)、`launch/runAdbShell/runWdaRequest`
+  - 批量编排:asyncio 并发(信号量)、`continueOnError` 首错即停后续记 `notExecuted`、
+    per-file 结果增量写 `--output` JSON、汇总索引 JSON + 退出码(全成功=0,否则=1)
+  - `--share-browser-context` 跨 web 文件共享同一 **context**(共享 cookie/会话)
+  - `examples/cli/`(web / android / suite 示例)+ `docs/CLI.md`
+
+### Notes(与 JS 的有意取舍)
+
+- `--web.* / --android.*` 目标覆盖只在脚本声明了同类目标(或无目标)时叠加,不会给
+  一个 android 脚本平白塞 web 块再报 "multiple targets"(比 JS 更宽松)。
+- 批量里某个 yaml 解析失败记为该文件 `failed` 并继续其余文件(退出码仍 1),而非整批
+  抛错中止。`--files` 匹配 0 个文件时退出码 1(fail-loud,JS 为 0)。
+- summary 的 `generatedAt` 用确定性 ISO-8601(JS 用 locale 字符串)。
+- `serve`(本地静态服务器)与 `bridgeMode`(Chrome 扩展桥)暂不支持。
+
 ## [0.3.7] - 2026-06-16
 
 回归/集成自审: 对前六轮重度修改的热点路径做对抗验证自审, 修掉 9 个改动引入或

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pymidscene"
-version = "0.3.7"
+version = "0.4.0"
 description = "Python SDK for Midscene.js - AI-powered UI automation using natural language"
 authors = ["AIPythoner"]
 readme = "README.md"
@@ -25,6 +25,9 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Topic :: Internet :: WWW/HTTP :: Browsers",
 ]
+
+[tool.poetry.scripts]
+pymidscene = "pymidscene.cli.main:main"
 
 [tool.poetry.dependencies]
 python = "^3.10"

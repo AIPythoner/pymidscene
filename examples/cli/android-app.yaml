@@ -1,0 +1,17 @@
+# 示例:Android 自动化(需装 pymidscene[android] 且 adb 已连上设备)
+#   pymidscene examples/cli/android-app.yaml
+#
+# deviceId 不填则用第一台在线设备;launch 可填 app 包名或 URL。
+android:
+  # deviceId: "emulator-5554"
+  launch: com.android.settings
+  imeStrategy: yadb-for-non-ascii
+
+tasks:
+  - name: toggle wifi
+    flow:
+      - aiTap: the Network & internet entry
+      - aiWaitFor: the Wi-Fi switch is visible
+        timeout: 10000
+      - aiTap: the Wi-Fi toggle
+      - aiAssert: the Wi-Fi screen is shown
